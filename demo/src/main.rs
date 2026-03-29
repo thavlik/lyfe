@@ -521,16 +521,20 @@ impl ApplicationHandler for DemoApp {
 
 impl Drop for DemoApp {
     fn drop(&mut self) {
+        log::info!("DemoApp::drop - starting cleanup");
         // Wait for GPU to be idle before cleanup
         if let Some(ctx) = &self.render_ctx {
             unsafe { ctx.device.device_wait_idle().ok(); }
         }
+        log::info!("DemoApp::drop - GPU idle");
         
         // Drop simulation first (it has Vulkan resources from its own device)
         drop(self.simulation.take());
+        log::info!("DemoApp::drop - simulation dropped");
         
         // Drop egui_renderer before render_ctx (it holds a cloned Device handle)
         drop(self.egui_renderer.take());
+        log::info!("DemoApp::drop - egui_renderer dropped");
         
         // Clean up render pipeline before render context is dropped
         // Order matters: pipeline uses ctx's allocator
@@ -538,9 +542,10 @@ impl Drop for DemoApp {
             log::info!("Cleaning up render pipeline...");
             pipeline.destroy(ctx);
         }
+        log::info!("DemoApp::drop - pipeline destroyed");
         
         // Now it's safe to drop the render_ctx and other resources
-        log::info!("Demo app cleanup complete");
+        log::info!("DemoApp::drop - cleanup complete, dropping remaining fields");
     }
 }
 

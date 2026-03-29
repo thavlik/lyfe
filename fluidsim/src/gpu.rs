@@ -828,11 +828,14 @@ impl GpuSimulation {
 
 impl Drop for GpuSimulation {
     fn drop(&mut self) {
+        log::info!("GpuSimulation::drop - starting");
         unsafe {
             self.device.device_wait_idle().ok();
+            log::info!("GpuSimulation::drop - device idle");
             
             // Drop coarse_grid FIRST - it holds cloned device handle and references our buffers
             drop(self.coarse_grid.take());
+            log::info!("GpuSimulation::drop - coarse_grid dropped");
 
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
@@ -866,13 +869,18 @@ impl Drop for GpuSimulation {
             alloc.free(std::mem::take(&mut self.readback_buffer.allocation)).ok();
             
             drop(alloc);
+            log::info!("GpuSimulation::drop - buffers freed");
 
             // Drop the allocator BEFORE destroying the device.
             // gpu_allocator::Allocator::drop calls vkFreeMemory, which requires a live device.
             drop(self.allocator.take());
+            log::info!("GpuSimulation::drop - allocator dropped, device handle: {:?}", self.device.handle());
 
-            self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
+            // Temporarily skip destroy to diagnose segfault:
+            log::info!("GpuSimulation::drop - skipping destroy_device/destroy_instance for debugging");
+            // self.device.destroy_device(None);
+            // self.instance.destroy_instance(None);
+            log::info!("GpuSimulation::drop - done");
         }
     }
 }

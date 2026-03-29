@@ -504,8 +504,10 @@ impl RenderContext {
 
 impl Drop for RenderContext {
     fn drop(&mut self) {
+        log::info!("RenderContext::drop - starting");
         unsafe {
             self.device.device_wait_idle().ok();
+            log::info!("RenderContext::drop - device idle");
 
             for &sem in &self.image_available_semaphores {
                 self.device.destroy_semaphore(sem, None);
@@ -528,13 +530,17 @@ impl Drop for RenderContext {
             self.device.destroy_render_pass(self.render_pass, None);
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
+            log::info!("RenderContext::drop - vulkan objects destroyed");
 
             // Drop the allocator BEFORE destroying the device.
             // gpu_allocator::Allocator::drop calls vkFreeMemory, which requires a live device.
             drop(self.allocator.take());
+            log::info!("RenderContext::drop - allocator dropped");
 
             self.device.destroy_device(None);
+            log::info!("RenderContext::drop - device destroyed");
             self.instance.destroy_instance(None);
+            log::info!("RenderContext::drop - instance destroyed");
         }
     }
 }
