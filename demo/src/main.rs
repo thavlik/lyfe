@@ -147,48 +147,50 @@ impl DemoApp {
             // Poll for any completed readbacks
             if let Some(data) = sim.poll_async_inspection() {
                 // New data available - format it
+                let species_lines: String = data.concentrations.iter()
+                    .enumerate()
+                    .filter(|&(_, c)| *c > 0.001)
+                    .map(|(i, c)| {
+                        let name = self.species_names.get(i)
+                            .map(|s| s.as_str())
+                            .unwrap_or("?");
+                        format!("  {:<6} {:>8.3} M", name, c)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 self.tooltip_text = format!(
                     "Coarse Cell ({}, {})\n\
                      Fluid: {} / Solid: {}\n\
-                     Species: {}\n\
-                     Age: {:.0}ms",
+                     Age: {:.0}ms\n\
+                     Species:\n{}",
                     data.coord.0, data.coord.1,
                     data.fluid_count, data.solid_count,
-                    data.concentrations.iter()
-                        .enumerate()
-                        .filter(|&(_, c)| *c > 0.001)
-                        .map(|(i, c)| {
-                            let name = self.species_names.get(i)
-                                .map(|s| s.as_str())
-                                .unwrap_or("?");
-                            format!("{}:{:.3}M", name, c)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    data.age.as_secs_f64() * 1000.0
+                    data.age.as_secs_f64() * 1000.0,
+                    species_lines,
                 );
                 self.show_tooltip = true;
             } else if let Some(data) = sim.get_cached_inspection() {
                 // Use cached data (may be stale)
+                let species_lines: String = data.concentrations.iter()
+                    .enumerate()
+                    .filter(|&(_, c)| *c > 0.001)
+                    .map(|(i, c)| {
+                        let name = self.species_names.get(i)
+                            .map(|s| s.as_str())
+                            .unwrap_or("?");
+                        format!("  {:<6} {:>8.3} M", name, c)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 self.tooltip_text = format!(
                     "Coarse Cell ({}, {})\n\
                      Fluid: {} / Solid: {}\n\
-                     Species: {}\n\
-                     Age: {:.0}ms (cached)",
+                     Age: {:.0}ms (cached)\n\
+                     Species:\n{}",
                     data.coord.0, data.coord.1,
                     data.fluid_count, data.solid_count,
-                    data.concentrations.iter()
-                        .enumerate()
-                        .filter(|&(_, c)| *c > 0.001)
-                        .map(|(i, c)| {
-                            let name = self.species_names.get(i)
-                                .map(|s| s.as_str())
-                                .unwrap_or("?");
-                            format!("{}:{:.3}M", name, c)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    data.age.as_secs_f64() * 1000.0
+                    data.age.as_secs_f64() * 1000.0,
+                    species_lines,
                 );
                 self.show_tooltip = true;
             } else {
