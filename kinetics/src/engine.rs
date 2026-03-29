@@ -4,25 +4,22 @@
 //! It receives `SemanticSnapshot` inputs and produces `SemanticUpdate` outputs.
 
 use crate::{
-    KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate,
-    noop::NoopEvaluator,
-    acid_base::AcidBaseEvaluator,
-    lean_evaluator::LeanEvaluator,
-    diagnostics::KineticsDiagnostic,
+    KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate, acid_base::AcidBaseEvaluator,
+    diagnostics::KineticsDiagnostic, lean_evaluator::LeanEvaluator, noop::NoopEvaluator,
 };
 
 /// The rule evaluator trait for pluggable rule backends.
 pub trait RuleEvaluator: Send + Sync {
     /// Get the name of this evaluator.
     fn name(&self) -> &str;
-    
+
     /// Evaluate a semantic snapshot and produce an update.
     fn evaluate(
         &mut self,
         snapshot: &SemanticSnapshot,
         config: &KineticsConfig,
     ) -> Result<SemanticUpdate, KineticsError>;
-    
+
     /// Check if this evaluator is available/functional.
     fn is_available(&self) -> bool;
 }
@@ -35,13 +32,13 @@ pub trait RuleEvaluator: Send + Sync {
 pub struct KineticsEngine {
     /// Configuration
     config: KineticsConfig,
-    
+
     /// The rule evaluator backend
     evaluator: Box<dyn RuleEvaluator>,
-    
+
     /// Statistics for monitoring
     stats: EngineStats,
-    
+
     /// Last evaluation time (simulated)
     last_evaluation_time: f64,
 }
@@ -67,7 +64,8 @@ impl KineticsEngine {
     /// Create a new kinetics engine with the given configuration.
     pub fn new(config: KineticsConfig) -> Result<Self, KineticsError> {
         config.validate().map_err(KineticsError::ConfigError)?;
-        
+        let initial_last_evaluation_time = -config.min_evaluation_interval;
+
         // Select the evaluator: Lean first, then Rust fallback, then noop
         let evaluator: Box<dyn RuleEvaluator> = if config.enable_lean {
             match LeanEvaluator::discover() {
@@ -96,12 +94,12 @@ impl KineticsEngine {
             log::info!("Kinetics engine using no-op evaluator");
             Box::new(NoopEvaluator::new())
         };
-        
+
         Ok(Self {
             config,
             evaluator,
             stats: EngineStats::default(),
-            last_evaluation_time: 0.0,
+            last_evaluation_time: initial_last_evaluation_time,
         })
     }
 
@@ -111,28 +109,35 @@ impl KineticsEngine {
         evaluator: Box<dyn RuleEvaluator>,
     ) -> Result<Self, KineticsError> {
         config.validate().map_err(KineticsError::ConfigError)?;
-        log::info!("Kinetics engine using custom evaluator: {}", evaluator.name());
+        log::info!(
+            "Kinetics engine using custom evaluator: {}",
+            evaluator.name()
+        );
+        let min_evaluation_interval = config.min_evaluation_interval;
         Ok(Self {
             config,
             evaluator,
             stats: EngineStats::default(),
-            last_evaluation_time: 0.0,
+            last_evaluation_time: -min_evaluation_interval,
         })
     }
-    
+
     /// Create a minimal no-op engine for testing.
     pub fn noop() -> Result<Self, KineticsError> {
         Self::new(KineticsConfig::noop())
     }
-    
+
     /// Evaluate a semantic snapshot and produce an update.
     ///
     /// This is the main entry point for `fluidsim` to invoke kinetics.
     /// It should be called once per second of simulated time.
-    pub fn evaluate(&mut self, snapshot: &SemanticSnapshot) -> Result<SemanticUpdate, KineticsError> {
+    pub fn evaluate(
+        &mut self,
+        snapshot: &SemanticSnapshot,
+    ) -> Result<SemanticUpdate, KineticsError> {
         // Validate snapshot
         snapshot.validate().map_err(KineticsError::SnapshotError)?;
-        
+
         // Check if we should skip this evaluation (rate limiting)
         let time_since_last = snapshot.sim_time_seconds - self.last_evaluation_time;
         if time_since_last < self.config.min_evaluation_interval * 0.9 {
@@ -147,18 +152,18 @@ impl KineticsEngine {
                 snapshot.sim_time_seconds + self.config.min_evaluation_interval,
             ));
         }
-        
+
         // Perform evaluation with timing
         let start = std::time::Instant::now();
         let result = self.evaluator.evaluate(snapshot, &self.config);
         let elapsed = start.elapsed().as_secs_f64();
-        
+
         // Update statistics
         self.stats.evaluation_count += 1;
         self.stats.total_evaluation_time_seconds += elapsed;
-        self.stats.avg_evaluation_time_seconds = 
+        self.stats.avg_evaluation_time_seconds =
             self.stats.total_evaluation_time_seconds / self.stats.evaluation_count as f64;
-        
+
         match &result {
             Ok(update) => {
                 self.last_evaluation_time = snapshot.sim_time_seconds;
@@ -166,7 +171,7 @@ impl KineticsEngine {
                 if update.is_noop() {
                     self.stats.noop_count += 1;
                 }
-                
+
                 if self.config.verbose {
                     log::debug!(
                         "Kinetics evaluation completed in {:.3}ms: {} updates",
@@ -180,56 +185,56 @@ impl KineticsEngine {
                 log::error!("Kinetics evaluation failed: {}", e);
             }
         }
-        
+
         result
     }
-    
+
     /// Get the current configuration.
     pub fn config(&self) -> &KineticsConfig {
         &self.config
     }
-    
+
     /// Update the configuration.
     pub fn set_config(&mut self, config: KineticsConfig) -> Result<(), KineticsError> {
         config.validate().map_err(KineticsError::ConfigError)?;
         self.config = config;
         Ok(())
     }
-    
+
     /// Get engine statistics.
     pub fn stats(&self) -> &EngineStats {
         &self.stats
     }
-    
+
     /// Reset statistics.
     pub fn reset_stats(&mut self) {
         self.stats = EngineStats::default();
     }
-    
+
     /// Check if the evaluator is Lean-backed.
     pub fn lean_available(&self) -> bool {
         self.evaluator.name() == "lean"
     }
-    
+
     /// Get the evaluator name.
     pub fn evaluator_name(&self) -> &str {
         self.evaluator.name()
     }
-    
+
     /// Check if the evaluator is available.
     pub fn is_available(&self) -> bool {
         self.evaluator.is_available()
     }
-    
+
     /// Get the last evaluation time.
     pub fn last_evaluation_time(&self) -> f64 {
         self.last_evaluation_time
     }
-    
+
     /// Manually trigger a diagnostic check.
     pub fn run_diagnostics(&self, snapshot: &SemanticSnapshot) -> Vec<KineticsDiagnostic> {
         let mut diagnostics = Vec::new();
-        
+
         // Check for conservation issues
         if self.config.enable_conservation_checks {
             // TODO: Implement actual conservation checking
@@ -237,24 +242,25 @@ impl KineticsEngine {
                 "Conservation check placeholder".to_string(),
             ));
         }
-        
+
         // Check for numerical issues
         for tile in &snapshot.tiles {
             if tile.mean_temperature_kelvin < 0.0 {
-                diagnostics.push(KineticsDiagnostic::error(
-                    format!("Tile {} has negative temperature", tile.tile_id),
-                ));
+                diagnostics.push(KineticsDiagnostic::error(format!(
+                    "Tile {} has negative temperature",
+                    tile.tile_id
+                )));
             }
             for amount in &tile.species_mean_molarity {
                 if amount.value < 0.0 {
-                    diagnostics.push(KineticsDiagnostic::warning(
-                        format!("Tile {} has negative concentration for species {:?}", 
-                            tile.tile_id, amount.species_id),
-                    ));
+                    diagnostics.push(KineticsDiagnostic::warning(format!(
+                        "Tile {} has negative concentration for species {:?}",
+                        tile.tile_id, amount.species_id
+                    )));
                 }
             }
         }
-        
+
         diagnostics
     }
 }

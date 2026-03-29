@@ -43,6 +43,10 @@ pub struct SimulationConfig {
     /// faster than real-time.  Diffusion substeps are auto-scaled to
     /// maintain numerical stability.
     pub time_scale: f32,
+    /// Global multiplier applied to kinetics-provided effective reaction rates
+    /// before they are uploaded to the GPU. This lets fluidsim run visually
+    /// faster chemistry than lab-scale rates without changing rule definitions.
+    pub reaction_rate_scale: f32,
     /// Maximum wall-clock dt to accept per frame (seconds).  Prevents a
     /// spiral-of-death when a frame takes too long.
     pub max_frame_dt: f32,
@@ -59,6 +63,7 @@ impl Default for SimulationConfig {
             diffusion_substeps: 4,
             inspection_mip: 8,
             time_scale: 20.0,
+            reaction_rate_scale: 8.0,
             max_frame_dt: 1.0 / 15.0,
         }
     }
@@ -193,6 +198,7 @@ impl Simulation {
         gpu.init_reaction_pipeline(&temperatures)?;
         let runtime_readbacks_enabled = !gpu.uses_shared_vulkan_context();
         let inspection_readbacks_enabled = true;
+        let reaction_rate_scale = config.reaction_rate_scale;
 
         let mut simulation = Self {
             grid: scenario.grid,
@@ -211,7 +217,7 @@ impl Simulation {
             step_count: 0,
             paused: false,
             kinetics: KineticsIntegration::new().ok(),
-            update_applicator: SemanticUpdateApplicator::new(),
+            update_applicator: SemanticUpdateApplicator::new(reaction_rate_scale),
             pending_kinetics_evaluation: false,
             runtime_readbacks_enabled,
             inspection_readbacks_enabled,

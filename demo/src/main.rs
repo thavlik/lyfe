@@ -154,6 +154,7 @@ impl DemoApp {
             diffusion_substeps: 4,
             inspection_mip: self.inspection_mip,
             time_scale: 20.0,
+            reaction_rate_scale: 8.0,
             max_frame_dt: 1.0 / 15.0,
         };
 

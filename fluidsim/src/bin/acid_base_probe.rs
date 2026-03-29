@@ -30,6 +30,7 @@ fn main() {
         diffusion_substeps: 4,
         inspection_mip: 8,
         time_scale: 20.0,
+        reaction_rate_scale: 8.0,
         max_frame_dt: 1.0 / 60.0,
     };
     let width = config.width;

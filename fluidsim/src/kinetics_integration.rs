@@ -299,12 +299,17 @@ impl std::fmt::Debug for KineticsIntegration {
 pub struct SemanticUpdateApplicator {
     /// Whether to log applied updates
     verbose: bool,
+    /// Global multiplier for kinetics-provided effective reaction rates.
+    reaction_rate_scale: f32,
 }
 
 impl SemanticUpdateApplicator {
     /// Create a new applicator.
-    pub fn new() -> Self {
-        Self { verbose: false }
+    pub fn new(reaction_rate_scale: f32) -> Self {
+        Self {
+            verbose: false,
+            reaction_rate_scale,
+        }
     }
 
     /// Enable verbose logging.
@@ -432,8 +437,9 @@ impl SemanticUpdateApplicator {
             }
         };
 
-        // Use effective_rate (pre-scaled for GPU stability by the rule source)
-        let rate = directive.effective_rate as f32;
+        // Apply a fluidsim-side global scale so rule sources can stay close to
+        // lab-style values while the simulation controls visible pacing.
+        let rate = (directive.effective_rate as f32) * self.reaction_rate_scale;
 
         let enthalpy = directive.enthalpy_delta_j_per_mol.unwrap_or(0.0) as f32;
         let entropy = directive.entropy_delta_j_per_mol_k.unwrap_or(0.0) as f32;
@@ -450,6 +456,6 @@ impl SemanticUpdateApplicator {
 
 impl Default for SemanticUpdateApplicator {
     fn default() -> Self {
-        Self::new()
+        Self::new(1.0)
     }
 }

@@ -24,7 +24,8 @@ pub const REACTION_H_OH_WATER: ReactionId = ReactionId(1);
 /// This is one of the fastest known reactions.
 const RATE_CONSTANT_298K: f64 = 1.4e11;
 
-/// Effective rate for GPU simulation (scaled down for visual stability).
+/// Effective rate delivered by the rule source before fluidsim applies its
+/// global reaction-rate multiplier.
 const EFFECTIVE_RATE: f64 = 1.0;
 
 /// Standard enthalpy of neutralization ΔH° (J/mol), exothermic → negative.

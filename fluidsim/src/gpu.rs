@@ -1328,6 +1328,11 @@ impl GpuSimulation {
             correction_strength: charge_correction_strength,
             _pad: [0; 3],
         };
+        let reaction_substep_dt = if substeps > 0 {
+            reaction_dt / substeps as f32
+        } else {
+            reaction_dt
+        };
 
         let mut temperature_current_buffer = self.reaction.as_ref()
             .map(|rxn| rxn.temperature_current_buffer)
@@ -1420,6 +1425,24 @@ impl GpuSimulation {
             self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
 
             if let Some(rxn) = self.reaction.as_ref() {
+                let reaction_push = ReactionPushConstants {
+                    width: self.width,
+                    height: self.height,
+                    species_count: self.species_count as u32,
+                    num_reactions: rxn.active_rule_count,
+                    dt: reaction_substep_dt,
+                    _pad: [0; 3],
+                };
+                let reaction_descriptor_set = rxn.reaction_descriptor_sets[
+                    Self::reaction_descriptor_index(self.current_buffer, temperature_current_buffer)
+                ];
+                self.record_reaction_dispatch(cmd, rxn, reaction_descriptor_set, &reaction_push);
+                self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
+                self.record_compute_buffer_barrier(
+                    cmd,
+                    Self::temperature_buffer_handle(rxn, temperature_current_buffer),
+                );
+
                 let thermal_push = ThermalPushConstants {
                     width: self.width,
                     height: self.height,
@@ -1435,42 +1458,6 @@ impl GpuSimulation {
                     Self::temperature_buffer_handle(rxn, temperature_current_buffer),
                 );
             }
-        }
-
-        if let Some(rxn) = self.reaction.as_ref() {
-            let reaction_push = ReactionPushConstants {
-                width: self.width,
-                height: self.height,
-                species_count: self.species_count as u32,
-                num_reactions: rxn.active_rule_count,
-                dt: reaction_dt,
-                _pad: [0; 3],
-            };
-
-            let reaction_descriptor_set = rxn.reaction_descriptor_sets[
-                Self::reaction_descriptor_index(self.current_buffer, temperature_current_buffer)
-            ];
-            self.record_reaction_dispatch(cmd, rxn, reaction_descriptor_set, &reaction_push);
-            self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
-            self.record_compute_buffer_barrier(
-                cmd,
-                Self::temperature_buffer_handle(rxn, temperature_current_buffer),
-            );
-
-            let thermal_push = ThermalPushConstants {
-                width: self.width,
-                height: self.height,
-                thermal_diffusivity,
-                dt: substep_dt,
-                _pad: [0; 2],
-            };
-            let thermal_descriptor_set = rxn.thermal_descriptor_sets[temperature_current_buffer];
-            self.record_temperature_dispatch(cmd, rxn, thermal_descriptor_set, &thermal_push);
-            temperature_current_buffer = 1 - temperature_current_buffer;
-            self.record_compute_buffer_barrier(
-                cmd,
-                Self::temperature_buffer_handle(rxn, temperature_current_buffer),
-            );
         }
 
         if let Some(ref coarse) = self.coarse_grid {
