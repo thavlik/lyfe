@@ -194,83 +194,67 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
     let inner_x1 = outer_x1 - wall_thickness;
     let inner_y1 = outer_y1 - wall_thickness;
     
-    let inner_mid_x = (inner_x0 + inner_x1) / 2;
-    
     // Build the scenario
     let builder = ScenarioBuilder::new(width, height)
-        // Register all species (dissociated ions)
+        // Register species (only the ones we use)
         .register_species("Na+")
         .register_species("K+")
-        .register_species("Cl-")
-        .register_species("H+")
-        .register_species("OH-")
-        .register_species("Ti");  // For potential titanium dissolution (not used in this demo)
+        .register_species("Cl-");
     
     // Register titanium material
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
     
     // Create the hollow titanium square
-    let builder = builder.fill_hollow_rect(outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium);
+    let mut builder = builder.fill_hollow_rect(outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium);
     
-    // Inside the hollow square:
-    // Left half: 0.1 M NaCl -> Na+ = 0.1, Cl- = 0.1
-    // Right half: 0.2 M KCl -> K+ = 0.2, Cl- = 0.2
-    let builder = builder
-        .fill_concentration_rect(inner_x0, inner_y0, inner_mid_x, inner_y1, "Na+", 0.1)
-        .fill_concentration_rect(inner_x0, inner_y0, inner_mid_x, inner_y1, "Cl-", 0.1)
-        .fill_concentration_rect(inner_mid_x, inner_y0, inner_x1, inner_y1, "K+", 0.2)
-        .fill_concentration_rect(inner_mid_x, inner_y0, inner_x1, inner_y1, "Cl-", 0.2);
+    // Inside the hollow square, split diagonally:
+    // - Top left (above diagonal from top-right to bottom-left): 1.0 M Na+, 1.0 M Cl-
+    // - Bottom right (below diagonal): 1.0 M K+, 1.0 M Cl-
+    // Outside the box: pure water (no concentration)
     
-    // Outside the hollow square:
-    // Need to fill areas outside the square
-    // Left half of screen (x < center): 1.0 M NaOH -> Na+ = 1.0, OH- = 1.0
-    // Right half of screen (x >= center): 1.0 M HCl -> H+ = 1.0, Cl- = 1.0
+    let na_id = builder.species_registry.id_of("Na+").unwrap();
+    let k_id = builder.species_registry.id_of("K+").unwrap();
+    let cl_id = builder.species_registry.id_of("Cl-").unwrap();
     
-    // Fill outer regions (excluding the square area)
-    let mut builder = builder;
+    let inner_width = (inner_x1 - inner_x0) as f32;
+    let inner_height = (inner_y1 - inner_y0) as f32;
     
-    // Left outer region
-    builder = fill_outside_rect(builder, 0, 0, center_x, height, outer_x0, outer_y0, outer_x1, outer_y1, "Na+", 1.0);
-    builder = fill_outside_rect(builder, 0, 0, center_x, height, outer_x0, outer_y0, outer_x1, outer_y1, "OH-", 1.0);
-    
-    // Right outer region
-    builder = fill_outside_rect(builder, center_x, 0, width, height, outer_x0, outer_y0, outer_x1, outer_y1, "H+", 1.0);
-    builder = fill_outside_rect(builder, center_x, 0, width, height, outer_x0, outer_y0, outer_x1, outer_y1, "Cl-", 1.0);
-    
-    builder.build()
-}
-
-/// Helper to fill concentration outside a rectangular exclusion zone.
-fn fill_outside_rect(
-    mut builder: ScenarioBuilder,
-    fill_x0: u32, fill_y0: u32,
-    fill_x1: u32, fill_y1: u32,
-    exclude_x0: u32, exclude_y0: u32,
-    exclude_x1: u32, exclude_y1: u32,
-    species: &str,
-    concentration: f64,
-) -> ScenarioBuilder {
-    let species_id = match builder.species_registry.id_of(species) {
-        Some(id) => id,
-        None => return builder,
-    };
-    
-    for y in fill_y0..fill_y1 {
-        for x in fill_x0..fill_x1 {
-            // Skip if inside exclusion zone
-            if x >= exclude_x0 && x < exclude_x1 && y >= exclude_y0 && y < exclude_y1 {
+    for y in inner_y0..inner_y1 {
+        for x in inner_x0..inner_x1 {
+            let index = builder.grid.index_of(CellCoord::new(x, y));
+            if builder.solid_geometry.is_solid(index) {
                 continue;
             }
             
-            let index = builder.grid.index_of(CellCoord::new(x, y));
-            if !builder.solid_geometry.is_solid(index) {
+            // Normalized position within inner region (0..1)
+            let nx = (x - inner_x0) as f32 / inner_width;
+            let ny = (y - inner_y0) as f32 / inner_height;
+            
+            // Diagonal line from top-right (1,0) to bottom-left (0,1)
+            // Points where nx + ny < 1 are in the top-left triangle
+            if nx + ny < 1.0 {
+                // Top-left: Na+ and Cl-
                 builder.initial_concentrations
                     .entry(index)
                     .or_default()
-                    .set(species_id, concentration);
+                    .set(na_id, 1.0);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(cl_id, 1.0);
+            } else {
+                // Bottom-right: K+ and Cl-
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(k_id, 1.0);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(cl_id, 1.0);
             }
         }
     }
     
-    builder
+    builder.build()
 }
