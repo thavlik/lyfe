@@ -306,6 +306,47 @@ impl DemoApp {
         }
     }
 
+    fn hovered_coarse_rect(&self) -> Option<egui::Rect> {
+        let sim = self.simulation.as_ref()?;
+        let window = self.window.as_ref()?;
+        let (coarse_x, coarse_y) = self.last_tooltip_coord?;
+        let mip = sim.coarse_mip_factor()?;
+        let (grid_w, grid_h) = sim.dimensions();
+
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let logical_w = size.width as f32 / scale;
+        let logical_h = size.height as f32 / scale;
+
+        let cell_w = logical_w * mip as f32 / grid_w as f32;
+        let cell_h = logical_h * mip as f32 / grid_h as f32;
+        let min_x = coarse_x as f32 * cell_w;
+        let min_y = coarse_y as f32 * cell_h;
+
+        Some(egui::Rect::from_min_size(
+            egui::pos2(min_x, min_y),
+            egui::vec2(cell_w, cell_h),
+        ))
+    }
+
+    fn draw_hovered_coarse_outline(ctx: &egui::Context, rect: egui::Rect) {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("coarse_hover_outline"),
+        ));
+
+        painter.rect_stroke(
+            rect.expand(0.5),
+            0.0,
+            egui::Stroke::new(3.0, egui::Color32::from_rgba_unmultiplied(8, 12, 18, 220)),
+        );
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 242, 120)),
+        );
+    }
+
     fn push_performance_sample(&mut self, sample: PerformanceSample) {
         self.performance_samples.push_back(sample);
         let cutoff = sample.timestamp - PERFORMANCE_WINDOW;
@@ -737,10 +778,15 @@ impl ApplicationHandler for DemoApp {
                 let performance_overlay = self.performance_overlay;
                 let performance_summary = self.performance_summary();
                 let performance_samples: Vec<_> = self.performance_samples.iter().copied().collect();
+                let hovered_coarse_rect = self.hovered_coarse_rect();
                 
                 // Render egui overlay (not actually rendered to screen)
                 if let (Some(egui), Some(window)) = (&mut self.egui_renderer, &self.window) {
                     egui.begin_frame(window);
+
+                    if let Some(rect) = hovered_coarse_rect {
+                        Self::draw_hovered_coarse_outline(egui.context(), rect);
+                    }
                     
                     // Show tooltip near mouse
                     if self.show_tooltip {

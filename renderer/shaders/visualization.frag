@@ -5,7 +5,7 @@
 // Coloring scheme:
 // - Pure water (zero solute): Light blue
 // - Each species gets a pre-computed color from a CPU-side lookup table
-// - 1.0 M concentration = 100% color intensity for that species
+// - 0.5 M concentration = 100% color intensity for that species
 // - Colors are blended with weighted linear interpolation
 
 layout(location = 0) in vec2 fragUV;
@@ -133,16 +133,16 @@ void main() {
     }
     
     // Fluid cell - blend species colors based on concentration
-    // 1.0 M = 100% weight for that species color
+    // 0.5 M = 100% weight for that species color
     vec3 species_blend = vec3(0.0);
     float total_conc = 0.0;
     
     for (uint s = 0; s < min(species_count, 16u); s++) {
         float conc = concentrations[s * cell_count + cell_index];
         if (conc > 0.0) {
-            // Weight is directly the concentration (molar)
+            // 0.5 M should already read as full-intensity species color.
             // Clamp to reasonable range for visualization
-            float weight = min(conc, 2.0);
+            float weight = min(conc * 2.0, 2.0);
             species_blend += species_colors[s].rgb * weight;
             total_conc += weight;
         }
@@ -156,7 +156,7 @@ void main() {
         // Normalize species blend
         vec3 normalized_species = species_blend / total_conc;
         // Blend factor: how much species color vs water color
-        // At 1.0 M total, we want about 50% species color
+        // At 0.5 M total, we want about 50% species color
         float blend_factor = 1.0 - exp(-total_conc * 0.5);
         final_color = mix(WATER_COLOR, normalized_species, blend_factor);
     } else {
