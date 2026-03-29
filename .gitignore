@@ -5,3 +5,4 @@ notes.txt
 .buildx-cache
 .env.test
 !.env.test.example
+lean/.lake
