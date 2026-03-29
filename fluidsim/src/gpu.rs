@@ -872,6 +872,69 @@ impl GpuSimulation {
         Ok(())
     }
 
+    fn readback_buffer_sync(
+        device: &ash::Device,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        fence: vk::Fence,
+        src: vk::Buffer,
+        dst: vk::Buffer,
+        size: u64,
+        reuse_cmd: Option<vk::CommandBuffer>,
+    ) -> Result<()> {
+        let (cmd, allocated) = if let Some(cmd) = reuse_cmd {
+            (cmd, false)
+        } else {
+            let alloc_info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            let cmd = unsafe { device.allocate_command_buffers(&alloc_info)? }[0];
+            (cmd, true)
+        };
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { device.begin_command_buffer(cmd, &begin_info)? };
+
+        let barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .buffer(src)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        unsafe {
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+        }
+
+        let copy_region = vk::BufferCopy::default().size(size);
+        unsafe { device.cmd_copy_buffer(cmd, src, dst, &[copy_region]) };
+        unsafe { device.end_command_buffer(cmd)? };
+
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(std::slice::from_ref(&cmd));
+
+        unsafe {
+            device.reset_fences(&[fence])?;
+            device.queue_submit(queue, &[submit_info], fence)?;
+            device.wait_for_fences(&[fence], true, u64::MAX)?;
+            if allocated {
+                device.free_command_buffers(command_pool, &[cmd]);
+            }
+        }
+
+        Ok(())
+    }
+
     fn update_descriptor_set(
         device: &ash::Device,
         set: vk::DescriptorSet,
@@ -1231,18 +1294,18 @@ impl GpuSimulation {
         }
     }
 
-    /// Execute a full simulation step as a single GPU submission.
-    pub fn step_frame(
+    pub fn record_step_frame(
         &mut self,
+        cmd: vk::CommandBuffer,
         substeps: u32,
         substep_dt: f32,
         diffusion_rate: f32,
         charge_correction_strength: f32,
         reaction_dt: f32,
         thermal_diffusivity: f32,
-    ) -> Result<()> {
+    ) {
         if substeps == 0 {
-            return Ok(());
+            return;
         }
 
         let charge_push = ChargeProjectionPushConstants {
@@ -1257,12 +1320,62 @@ impl GpuSimulation {
             .map(|rxn| rxn.temperature_current_buffer)
             .unwrap_or(0);
 
-        unsafe {
-            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+        let mut input_barriers = vec![
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                .buffer(self.current_concentration_buffer_handle())
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(self.solid_mask.buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(self.diffusion_coeffs.buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(self.species_charges.buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+        ];
 
-            let begin_info = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+        if let Some(rxn) = self.reaction.as_ref() {
+            input_barriers.push(
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                    .buffer(Self::temperature_buffer_handle(rxn, temperature_current_buffer))
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+            );
+            input_barriers.push(
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .buffer(rxn.rules_buffer.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+            );
+        }
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &input_barriers,
+                &[],
+            );
         }
 
         for _ in 0..substeps {
@@ -1277,7 +1390,7 @@ impl GpuSimulation {
             };
 
             let diffusion_descriptor_set = self.descriptor_sets[self.current_buffer];
-            self.record_diffusion_dispatch(self.command_buffer, diffusion_descriptor_set, &diffusion_push);
+            self.record_diffusion_dispatch(cmd, diffusion_descriptor_set, &diffusion_push);
 
             let next_buffer = 1 - self.current_buffer;
             let next_concentration_buffer = if next_buffer == 0 {
@@ -1285,17 +1398,17 @@ impl GpuSimulation {
             } else {
                 self.conc_buffer_b.buffer
             };
-            self.record_compute_buffer_barrier(self.command_buffer, next_concentration_buffer);
+            self.record_compute_buffer_barrier(cmd, next_concentration_buffer);
 
             if let Some(ref coarse) = self.coarse_grid {
-                coarse.record_compute(self.command_buffer, next_buffer);
+                coarse.record_compute(cmd, next_buffer);
             }
 
             self.current_buffer = next_buffer;
 
             let charge_descriptor_set = self.charge_descriptor_sets[self.current_buffer];
-            self.record_charge_dispatch(self.command_buffer, charge_descriptor_set, &charge_push);
-            self.record_compute_buffer_barrier(self.command_buffer, self.current_concentration_buffer_handle());
+            self.record_charge_dispatch(cmd, charge_descriptor_set, &charge_push);
+            self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
 
             if let Some(rxn) = self.reaction.as_ref() {
                 let thermal_push = ThermalPushConstants {
@@ -1306,10 +1419,10 @@ impl GpuSimulation {
                     _pad: [0; 2],
                 };
                 let thermal_descriptor_set = rxn.thermal_descriptor_sets[temperature_current_buffer];
-                self.record_temperature_dispatch(self.command_buffer, rxn, thermal_descriptor_set, &thermal_push);
+                self.record_temperature_dispatch(cmd, rxn, thermal_descriptor_set, &thermal_push);
                 temperature_current_buffer = 1 - temperature_current_buffer;
                 self.record_compute_buffer_barrier(
-                    self.command_buffer,
+                    cmd,
                     Self::temperature_buffer_handle(rxn, temperature_current_buffer),
                 );
             }
@@ -1328,10 +1441,10 @@ impl GpuSimulation {
             let reaction_descriptor_set = rxn.reaction_descriptor_sets[
                 Self::reaction_descriptor_index(self.current_buffer, temperature_current_buffer)
             ];
-            self.record_reaction_dispatch(self.command_buffer, rxn, reaction_descriptor_set, &reaction_push);
-            self.record_compute_buffer_barrier(self.command_buffer, self.current_concentration_buffer_handle());
+            self.record_reaction_dispatch(cmd, rxn, reaction_descriptor_set, &reaction_push);
+            self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
             self.record_compute_buffer_barrier(
-                self.command_buffer,
+                cmd,
                 Self::temperature_buffer_handle(rxn, temperature_current_buffer),
             );
 
@@ -1343,13 +1456,48 @@ impl GpuSimulation {
                 _pad: [0; 2],
             };
             let thermal_descriptor_set = rxn.thermal_descriptor_sets[temperature_current_buffer];
-            self.record_temperature_dispatch(self.command_buffer, rxn, thermal_descriptor_set, &thermal_push);
+            self.record_temperature_dispatch(cmd, rxn, thermal_descriptor_set, &thermal_push);
             temperature_current_buffer = 1 - temperature_current_buffer;
             self.record_compute_buffer_barrier(
-                self.command_buffer,
+                cmd,
                 Self::temperature_buffer_handle(rxn, temperature_current_buffer),
             );
         }
+
+        if let Some(rxn) = self.reaction.as_mut() {
+            rxn.temperature_current_buffer = temperature_current_buffer;
+        }
+
+        self.record_render_barriers(cmd);
+    }
+
+    /// Execute a full simulation step as a single GPU submission.
+    pub fn step_frame(
+        &mut self,
+        substeps: u32,
+        substep_dt: f32,
+        diffusion_rate: f32,
+        charge_correction_strength: f32,
+        reaction_dt: f32,
+        thermal_diffusivity: f32,
+    ) -> Result<()> {
+        unsafe {
+            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+        }
+
+        self.record_step_frame(
+            self.command_buffer,
+            substeps,
+            substep_dt,
+            diffusion_rate,
+            charge_correction_strength,
+            reaction_dt,
+            thermal_diffusivity,
+        );
 
         unsafe {
             self.device.end_command_buffer(self.command_buffer)?;
@@ -1360,10 +1508,6 @@ impl GpuSimulation {
             self.device.reset_fences(&[self.fence])?;
             self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
             self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
-        }
-
-        if let Some(rxn) = self.reaction.as_mut() {
-            rxn.temperature_current_buffer = temperature_current_buffer;
         }
 
         Ok(())
@@ -1534,7 +1678,7 @@ impl GpuSimulation {
 
         let total_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
 
-        Self::copy_buffer_sync(
+        Self::readback_buffer_sync(
             &self.device,
             self.command_pool,
             self.compute_queue,
@@ -1609,7 +1753,7 @@ impl GpuSimulation {
 
         let size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
 
-        Self::copy_buffer_sync(
+        Self::readback_buffer_sync(
             &self.device,
             self.command_pool,
             self.compute_queue,
@@ -1645,6 +1789,10 @@ impl GpuSimulation {
             material_ids: self.material_ids.buffer,
             temperature: self.current_temperature_buffer(),
         }
+    }
+
+    pub fn uses_shared_vulkan_context(&self) -> bool {
+        !self.owns_vulkan_context
     }
 
     pub fn record_render_barriers(&self, cmd: vk::CommandBuffer) {

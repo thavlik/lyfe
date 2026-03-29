@@ -503,6 +503,18 @@ impl RenderContext {
         self.command_buffers[self.current_frame]
     }
 
+    pub fn current_frame_index(&self) -> usize {
+        self.current_frame
+    }
+
+    pub fn is_frame_complete(&self, frame_index: usize) -> Result<bool> {
+        match unsafe { self.device.get_fence_status(self.in_flight_fences[frame_index]) } {
+            Ok(true) => Ok(true),
+            Ok(false) => Ok(false),
+            Err(error) => bail!("Failed to query fence status for frame {}: {:?}", frame_index, error),
+        }
+    }
+
     pub fn shared_gpu_context(&self) -> SharedGpuContext {
         SharedGpuContext {
             instance: self.instance.clone(),

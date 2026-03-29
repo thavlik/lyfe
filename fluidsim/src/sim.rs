@@ -81,6 +81,16 @@ pub struct RenderState {
     pub temperatures: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PreparedSimulationStep {
+    substeps: u32,
+    substep_dt: f32,
+    diffusion_rate: f32,
+    charge_correction_strength: f32,
+    reaction_dt: f32,
+    thermal_diffusivity: f32,
+}
+
 /// The main simulation state.
 pub struct Simulation {
     /// Grid dimensions and utilities
@@ -117,6 +127,10 @@ pub struct Simulation {
     kinetics: Option<KineticsIntegration>,
     /// Semantic update applicator
     update_applicator: SemanticUpdateApplicator,
+    /// Whether the next completed frame should trigger a kinetics evaluation.
+    pending_kinetics_evaluation: bool,
+    /// Whether CPU readback-driven runtime features are allowed.
+    runtime_readbacks_enabled: bool,
 }
 
 impl Simulation {
@@ -174,6 +188,7 @@ impl Simulation {
         };
 
         gpu.init_reaction_pipeline(&temperatures)?;
+        let runtime_readbacks_enabled = !gpu.uses_shared_vulkan_context();
 
         let mut simulation = Self {
             grid: scenario.grid,
@@ -193,6 +208,8 @@ impl Simulation {
             paused: false,
             kinetics: KineticsIntegration::new().ok(),
             update_applicator: SemanticUpdateApplicator::new(),
+            pending_kinetics_evaluation: false,
+            runtime_readbacks_enabled,
         };
 
         simulation.bootstrap_kinetics(
@@ -302,17 +319,31 @@ impl Simulation {
     /// are computed dynamically so the CFL stability condition holds even
     /// at high diffusion rates.
     pub fn step(&mut self, dt: f32) -> Result<()> {
+        let Some(step) = self.prepare_frame_step(dt) else {
+            return Ok(());
+        };
+
+        self.gpu.step_frame(
+            step.substeps,
+            step.substep_dt,
+            step.diffusion_rate,
+            step.charge_correction_strength,
+            step.reaction_dt,
+            step.thermal_diffusivity,
+        )?;
+        self.finalize_completed_frame()?;
+        Ok(())
+    }
+
+    pub fn prepare_frame_step(&mut self, dt: f32) -> Option<PreparedSimulationStep> {
         if self.paused {
             log::trace!("Simulation is paused, skipping step");
-            return Ok(());
+            return None;
         }
 
-        // Cap wall-clock dt, then apply time-scale
         let wall_dt = dt.min(self.config.max_frame_dt);
         let dt_sim = wall_dt * self.config.time_scale;
 
-        // Dynamic substep count: ensure explicit Euler stability for both
-        // concentration diffusion and thermal diffusion.
         let species_d = self.config.diffusion_rate
             * self.species_registry.max_diffusion_coefficient().max(1.0);
         let max_d = species_d.max(self.config.thermal_diffusion_rate.max(0.0));
@@ -334,92 +365,115 @@ impl Simulation {
             self.config.diffusion_rate,
             self.config.thermal_diffusion_rate,
         );
-        self.gpu.step_frame(
-            substeps,
-            substep_dt,
-            self.config.diffusion_rate,
-            self.config.charge_correction_strength,
-            dt_sim,
-            self.config.thermal_diffusion_rate,
-        )?;
 
         self.time += dt_sim as f64;
         self.step_count += 1;
         self.cache_dirty = true;
 
-        // Kinetics evaluation (once per simulated second)
-        // This is the semantic update engine that provides validated parameters
         let should_evaluate_kinetics = self.kinetics.as_mut()
+            .filter(|_| self.runtime_readbacks_enabled)
             .map(|k| k.accumulate_time(dt_sim as f64))
             .unwrap_or(false);
-            
-        if should_evaluate_kinetics {
-            // Time to do a semantic evaluation
-            self.refresh_cache()?;
-            
-            // Gather data needed for kinetics evaluation
-            let fine_width = self.grid.width;
-            let fine_height = self.grid.height;
-            let sim_time = self.time;
-            let concentrations = self.cached_concentrations.as_ref().unwrap().clone();
-            let solid_mask = self.cached_solid_mask.as_ref().unwrap().clone();
-            let material_ids = self.cached_material_ids.as_ref().unwrap().clone();
-            let temperatures = self.cached_temperatures.clone()
-                .unwrap_or_else(|| vec![293.15; (fine_width * fine_height) as usize]);
-            
-            // Clone registries for the evaluate call (they're cheap to clone)
-            let species_registry = self.species_registry.clone();
-            let material_registry = self.material_registry.clone();
-            
-            // Now we can safely borrow kinetics mutably
-            if let Some(ref mut kinetics) = self.kinetics {
-                match kinetics.evaluate(
-                    fine_width,
-                    fine_height,
-                    sim_time,
-                    &concentrations,
-                    &solid_mask,
-                    &material_ids,
-                    &temperatures,
-                    &species_registry,
-                    &material_registry,
-                ) {
-                    Ok(update) => {
-                        // Apply the semantic update to get GPU reaction rules
-                        let (_applied, gpu_rules) = self.update_applicator.apply(
-                            update,
-                            &species_registry,
-                            &mut self.material_registry,
-                        );
+        self.pending_kinetics_evaluation |= should_evaluate_kinetics;
 
-                        // Initialize reaction pipeline if we have rules and haven't yet
-                        if !gpu_rules.is_empty() && self.gpu.reaction.is_none() {
-                            let temps = temperatures.clone();
-                            if let Err(e) = self.gpu.init_reaction_pipeline(&temps) {
-                                log::error!("Failed to initialize reaction pipeline: {}", e);
+        Some(PreparedSimulationStep {
+            substeps,
+            substep_dt,
+            diffusion_rate: self.config.diffusion_rate,
+            charge_correction_strength: self.config.charge_correction_strength,
+            reaction_dt: dt_sim,
+            thermal_diffusivity: self.config.thermal_diffusion_rate,
+        })
+    }
+
+    pub fn record_prepared_step(&mut self, cmd: vk::CommandBuffer, step: PreparedSimulationStep) {
+        self.gpu.record_step_frame(
+            cmd,
+            step.substeps,
+            step.substep_dt,
+            step.diffusion_rate,
+            step.charge_correction_strength,
+            step.reaction_dt,
+            step.thermal_diffusivity,
+        );
+    }
+
+    pub fn finalize_completed_frame(&mut self) -> Result<()> {
+        if !self.runtime_readbacks_enabled {
+            self.pending_kinetics_evaluation = false;
+            return Ok(());
+        }
+
+        if !self.pending_kinetics_evaluation {
+            return Ok(());
+        }
+
+        self.pending_kinetics_evaluation = false;
+        self.evaluate_kinetics_from_cache()
+    }
+
+    pub fn has_pending_kinetics_evaluation(&self) -> bool {
+        self.pending_kinetics_evaluation
+    }
+
+    fn evaluate_kinetics_from_cache(&mut self) -> Result<()> {
+        self.refresh_cache()?;
+
+        let fine_width = self.grid.width;
+        let fine_height = self.grid.height;
+        let sim_time = self.time;
+        let concentrations = self.cached_concentrations.as_ref().unwrap().clone();
+        let solid_mask = self.cached_solid_mask.as_ref().unwrap().clone();
+        let material_ids = self.cached_material_ids.as_ref().unwrap().clone();
+        let temperatures = self.cached_temperatures.clone()
+            .unwrap_or_else(|| vec![293.15; (fine_width * fine_height) as usize]);
+
+        let species_registry = self.species_registry.clone();
+        let material_registry = self.material_registry.clone();
+
+        if let Some(ref mut kinetics) = self.kinetics {
+            match kinetics.evaluate(
+                fine_width,
+                fine_height,
+                sim_time,
+                &concentrations,
+                &solid_mask,
+                &material_ids,
+                &temperatures,
+                &species_registry,
+                &material_registry,
+            ) {
+                Ok(update) => {
+                    let (_applied, gpu_rules) = self.update_applicator.apply(
+                        update,
+                        &species_registry,
+                        &mut self.material_registry,
+                    );
+
+                    if !gpu_rules.is_empty() && self.gpu.reaction.is_none() {
+                        let temps = temperatures.clone();
+                        if let Err(e) = self.gpu.init_reaction_pipeline(&temps) {
+                            log::error!("Failed to initialize reaction pipeline: {}", e);
+                        }
+                    }
+
+                    let mut rules_changed = false;
+                    if !gpu_rules.is_empty() {
+                        match self.gpu.upload_reaction_rules(&gpu_rules) {
+                            Ok(changed) => {
+                                rules_changed = changed;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to upload reaction rules: {}", e);
+                                rules_changed = true;
                             }
                         }
-
-                        // Upload reaction rules to GPU (tracking avoids redundant uploads)
-                        let mut rules_changed = false;
-                        if !gpu_rules.is_empty() {
-                            match self.gpu.upload_reaction_rules(&gpu_rules) {
-                                Ok(changed) => {
-                                    rules_changed = changed;
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to upload reaction rules: {}", e);
-                                    rules_changed = true;
-                                }
-                            }
-                        }
-
-                        Self::update_kinetics_interval(kinetics, rules_changed);
                     }
-                    Err(e) => {
-                        log::warn!("Kinetics evaluation failed: {}", e);
-                        // Continue with existing parameters - simulation stays stable
-                    }
+
+                    Self::update_kinetics_interval(kinetics, rules_changed);
+                }
+                Err(e) => {
+                    log::warn!("Kinetics evaluation failed: {}", e);
                 }
             }
         }
@@ -593,6 +647,10 @@ impl Simulation {
     /// Request an async readback of the coarse cell at the given screen position.
     /// Returns true if the request was accepted, false if rate-limited or no coarse grid.
     pub fn request_async_inspection(&mut self, screen_x: f32, screen_y: f32) -> bool {
+        if !self.runtime_readbacks_enabled {
+            return false;
+        }
+
         if let Some(ref mut coarse) = self.gpu.coarse_grid {
             let (cx, cy) = coarse.screen_to_coarse(screen_x, screen_y);
             coarse.request_cell_readback(cx, cy)
@@ -605,6 +663,10 @@ impl Simulation {
     /// Returns Some(data) if new data is available, None otherwise.
     /// This method never blocks.
     pub fn poll_async_inspection(&mut self) -> Option<CoarseCellData> {
+        if !self.runtime_readbacks_enabled {
+            return None;
+        }
+
         if let Some(ref mut coarse) = self.gpu.coarse_grid {
             coarse.poll_readback()
         } else {
@@ -615,6 +677,10 @@ impl Simulation {
     /// Get the last cached coarse cell data, even if stale.
     /// The `age` field indicates how old the data is.
     pub fn get_cached_inspection(&self) -> Option<CoarseCellData> {
+        if !self.runtime_readbacks_enabled {
+            return None;
+        }
+
         if let Some(ref coarse) = self.gpu.coarse_grid {
             coarse.get_cached_cell()
         } else {

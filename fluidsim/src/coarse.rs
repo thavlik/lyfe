@@ -539,6 +539,31 @@ impl CoarseGrid {
             if self.device.begin_command_buffer(self.readback_command_buffer, &begin_info).is_err() {
                 return false;
             }
+
+            let barriers = [
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .buffer(self.coarse_conc_buffer.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .buffer(self.coarse_fluid_count_buffer.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+            ];
+
+            self.device.cmd_pipeline_barrier(
+                self.readback_command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &barriers,
+                &[],
+            );
             
             // Copy concentrations for each species from this coarse cell
             let mut copy_regions = Vec::with_capacity(self.species_count + 1);
