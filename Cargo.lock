@@ -493,6 +493,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-ash-renderer"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68b62f9b5e8e3317c7aa715498eea336968ff22633e209e10acb6e129a06098c"
+dependencies = [
+ "ash",
+ "egui",
+ "log",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "egui-winit"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1610,6 +1622,7 @@ dependencies = [
  "ash",
  "bytemuck",
  "egui",
+ "egui-ash-renderer",
  "egui-winit",
  "fluidsim",
  "glam",

@@ -17,7 +17,7 @@ pub struct VisualizationPushConstants {
     pub width: u32,
     pub height: u32,
     pub species_count: u32,
-    pub _pad: u32,
+    pub frame_counter: u32,  // For debug visualization
 }
 
 /// A GPU buffer for the render pipeline.
@@ -90,6 +90,9 @@ pub struct RenderPipeline {
     pub grid_height: u32,
     pub species_count: usize,
     pub cell_count: usize,
+    
+    // Frame counter for debug visualization
+    pub frame_counter: u32,
 }
 
 impl RenderPipeline {
@@ -342,10 +345,11 @@ impl RenderPipeline {
             grid_height,
             species_count,
             cell_count,
+            frame_counter: 0,
         })
     }
 
-    /// Upload render state data to GPU.
+    /// Upload render state data to GPU using synchronous copies.
     pub fn upload_state(&mut self, ctx: &RenderContext, state: &RenderState) -> Result<()> {
         // Flatten concentrations
         let mut flat_conc: Vec<f32> = Vec::with_capacity(self.species_count * self.cell_count);
@@ -353,25 +357,41 @@ impl RenderPipeline {
             flat_conc.extend_from_slice(species_conc);
         }
 
-        // Upload concentrations
-        self.staging_buffer.write(&flat_conc)?;
+        // Debug: Log a sample concentration to verify data is changing
+        let center_idx = self.cell_count / 2 + self.grid_width as usize / 2;
+        if self.frame_counter % 30 == 0 {
+            log::debug!("Upload frame {}: center concentrations = [{:.4}, {:.4}, {:.4}]",
+                self.frame_counter,
+                flat_conc.get(center_idx).unwrap_or(&0.0),
+                flat_conc.get(self.cell_count + center_idx).unwrap_or(&0.0),
+                flat_conc.get(2 * self.cell_count + center_idx).unwrap_or(&0.0));
+        }
+
         let conc_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
-        copy_buffer_sync(ctx, self.staging_buffer.buffer, self.concentration_buffer.buffer, conc_size)?;
-
-        // Upload solid mask
-        self.staging_buffer.write(&state.solid_mask)?;
         let mask_size = (self.cell_count * std::mem::size_of::<u32>()) as u64;
-        copy_buffer_sync(ctx, self.staging_buffer.buffer, self.solid_mask_buffer.buffer, mask_size)?;
 
-        // Upload material IDs
+        // Upload concentrations with barrier
+        self.staging_buffer.write(&flat_conc)?;
+        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.concentration_buffer.buffer, conc_size)?;
+
+        // Upload solid mask with barrier
+        self.staging_buffer.write(&state.solid_mask)?;
+        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.solid_mask_buffer.buffer, mask_size)?;
+
+        // Upload material IDs with barrier
         self.staging_buffer.write(&state.material_ids)?;
-        copy_buffer_sync(ctx, self.staging_buffer.buffer, self.material_id_buffer.buffer, mask_size)?;
+        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.material_id_buffer.buffer, mask_size)?;
 
         Ok(())
     }
 
     /// Record rendering commands.
-    pub fn record(&self, ctx: &RenderContext, cmd: vk::CommandBuffer, image_index: usize) {
+    pub fn record(&mut self, ctx: &RenderContext, cmd: vk::CommandBuffer, image_index: usize) {
+        // Increment frame counter
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        
+        // Note: Memory barriers for buffer transfers are now in copy_buffer_with_barrier()
+        
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [0.0, 0.0, 0.1, 1.0], // Dark blue background
@@ -403,7 +423,7 @@ impl RenderPipeline {
             width: self.grid_width,
             height: self.grid_height,
             species_count: self.species_count as u32,
-            _pad: 0,
+            frame_counter: self.frame_counter,
         };
 
         unsafe {
@@ -428,6 +448,13 @@ impl RenderPipeline {
             );
             // Draw fullscreen triangle
             ctx.device.cmd_draw(cmd, 3, 1, 0, 0);
+            // Note: Render pass is NOT ended here - caller must end it after egui rendering
+        }
+    }
+
+    /// End the render pass. Call this after egui rendering.
+    pub fn end_render_pass(&self, ctx: &RenderContext, cmd: vk::CommandBuffer) {
+        unsafe {
             ctx.device.cmd_end_render_pass(cmd);
         }
     }
@@ -456,7 +483,7 @@ impl RenderPipeline {
     }
 }
 
-fn copy_buffer_sync(
+fn copy_buffer_with_barrier(
     ctx: &RenderContext,
     src: vk::Buffer,
     dst: vk::Buffer,
@@ -474,6 +501,26 @@ fn copy_buffer_sync(
 
     let copy_region = vk::BufferCopy::default().size(size);
     unsafe { ctx.device.cmd_copy_buffer(cmd, src, dst, &[copy_region]) };
+
+    // Add memory barrier to make the transfer visible to shader reads
+    let barrier = vk::BufferMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        .buffer(dst)
+        .offset(0)
+        .size(vk::WHOLE_SIZE);
+
+    unsafe {
+        ctx.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[barrier],
+            &[],
+        );
+    }
 
     unsafe { ctx.device.end_command_buffer(cmd)? };
 

@@ -39,6 +39,7 @@ struct DemoApp {
     inspection_mip: u32,
     show_tooltip: bool,
     tooltip_text: String,
+    species_names: Vec<String>,  // Cached species names for tooltip display
     
     // Timing
     last_frame: Instant,
@@ -62,6 +63,7 @@ impl DemoApp {
             inspection_mip: 8,
             show_tooltip: false,
             tooltip_text: String::new(),
+            species_names: Vec::new(),
             last_frame: Instant::now(),
             frame_count: 0,
             fps_update_time: Instant::now(),
@@ -79,7 +81,7 @@ impl DemoApp {
         let config = SimulationConfig {
             width: 512,
             height: 512,
-            diffusion_rate: 0.2,
+            diffusion_rate: 2.0,
             diffusion_substeps: 4,
             inspection_mip: self.inspection_mip,
         };
@@ -104,14 +106,21 @@ impl DemoApp {
         
         log::info!("Creating egui renderer...");
         // Create egui renderer
-        let egui_renderer = EguiRenderer::new(&window)?;
+        let egui_renderer = EguiRenderer::new(&render_ctx, &window)?;
         log::info!("Egui renderer created successfully");
+        
+        // Cache species names for tooltip display
+        let species_names: Vec<String> = simulation.species_registry()
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect();
         
         self.window = Some(window);
         self.render_ctx = Some(render_ctx);
         self.render_pipeline = Some(render_pipeline);
         self.egui_renderer = Some(egui_renderer);
         self.simulation = Some(simulation);
+        self.species_names = species_names;
         
         Ok(())
     }
@@ -120,11 +129,15 @@ impl DemoApp {
         let sim = self.simulation.as_mut().unwrap();
         let (grid_w, grid_h) = sim.dimensions();
         
-        // Convert mouse position to grid coordinates
+        // Convert mouse position (logical coords) to grid coordinates
         if let Some(window) = &self.window {
             let size = window.inner_size();
-            let grid_x = self.mouse_pos.0 * grid_w as f32 / size.width as f32;
-            let grid_y = self.mouse_pos.1 * grid_h as f32 / size.height as f32;
+            let scale = window.scale_factor() as f32;
+            // mouse_pos is in logical coords, so use logical size
+            let logical_w = size.width as f32 / scale;
+            let logical_h = size.height as f32 / scale;
+            let grid_x = self.mouse_pos.0 * grid_w as f32 / logical_w;
+            let grid_y = self.mouse_pos.1 * grid_h as f32 / logical_h;
             
             // Request async readback of this cell (rate-limited internally)
             let _ = sim.request_async_inspection(grid_x, grid_y);
@@ -142,7 +155,12 @@ impl DemoApp {
                     data.concentrations.iter()
                         .enumerate()
                         .filter(|&(_, c)| *c > 0.001)
-                        .map(|(i, c)| format!("{}:{:.3}", i, c))
+                        .map(|(i, c)| {
+                            let name = self.species_names.get(i)
+                                .map(|s| s.as_str())
+                                .unwrap_or("?");
+                            format!("{}:{:.3}M", name, c)
+                        })
                         .collect::<Vec<_>>()
                         .join(", "),
                     data.age.as_secs_f64() * 1000.0
@@ -160,7 +178,12 @@ impl DemoApp {
                     data.concentrations.iter()
                         .enumerate()
                         .filter(|&(_, c)| *c > 0.001)
-                        .map(|(i, c)| format!("{}:{:.3}", i, c))
+                        .map(|(i, c)| {
+                            let name = self.species_names.get(i)
+                                .map(|s| s.as_str())
+                                .unwrap_or("?");
+                            format!("{}:{:.3}M", name, c)
+                        })
                         .collect::<Vec<_>>()
                         .join(", "),
                     data.age.as_secs_f64() * 1000.0
@@ -177,11 +200,14 @@ impl DemoApp {
         let sim = self.simulation.as_mut().unwrap();
         let (grid_w, grid_h) = sim.dimensions();
         
-        // Convert mouse position to grid coordinates
+        // Convert mouse position (logical coords) to grid coordinates
         if let Some(window) = &self.window {
             let size = window.inner_size();
-            let grid_x = self.mouse_pos.0 * grid_w as f32 / size.width as f32;
-            let grid_y = self.mouse_pos.1 * grid_h as f32 / size.height as f32;
+            let scale = window.scale_factor() as f32;
+            let logical_w = size.width as f32 / scale;
+            let logical_h = size.height as f32 / scale;
+            let grid_x = self.mouse_pos.0 * grid_w as f32 / logical_w;
+            let grid_y = self.mouse_pos.1 * grid_h as f32 / logical_h;
             
             match sim.inspect_with_mip(grid_x, grid_y, self.inspection_mip) {
                 Ok(result) => {
@@ -206,6 +232,7 @@ impl DemoApp {
         let ctx = self.render_ctx.as_mut().unwrap();
         let pipeline = self.render_pipeline.as_mut().unwrap();
         let sim = self.simulation.as_mut().unwrap();
+        let egui = self.egui_renderer.as_mut().unwrap();
         
         let t0 = Instant::now();
         
@@ -223,6 +250,9 @@ impl DemoApp {
                 (t1-t0).as_secs_f64()*1000.0, 
                 (t2-t1).as_secs_f64()*1000.0);
         }
+
+        // Update egui textures before rendering
+        egui.set_textures(ctx)?;
         
         // Begin frame
         let image_index = match ctx.begin_frame()? {
@@ -245,7 +275,14 @@ impl DemoApp {
             ctx.device.begin_command_buffer(cmd, &begin_info)?;
         }
         
+        // Record fluid visualization (keeps render pass open)
         pipeline.record(ctx, cmd, image_index as usize);
+        
+        // Record egui draw commands inside the same render pass
+        egui.cmd_draw(ctx, cmd, ctx.swapchain_extent)?;
+        
+        // End render pass
+        pipeline.end_render_pass(ctx, cmd);
         
         unsafe {
             ctx.device.end_command_buffer(cmd)?;
@@ -257,6 +294,9 @@ impl DemoApp {
             log::debug!("end_frame returned false, needs resize");
             self.needs_resize = true;
         }
+        
+        // Free egui textures after rendering is complete
+        egui.free_textures()?;
         
         Ok(true)
     }
@@ -278,7 +318,7 @@ impl ApplicationHandler for DemoApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attrs = Window::default_attributes()
             .with_title("Fluid Simulation Demo")
-            .with_inner_size(PhysicalSize::new(800, 800));
+            .with_inner_size(PhysicalSize::new(1600, 1600));
         
         match event_loop.create_window(window_attrs) {
             Ok(window) => {
@@ -358,7 +398,9 @@ impl ApplicationHandler for DemoApp {
             }
             
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_pos = (position.x as f32, position.y as f32);
+                // Store position in logical coordinates for egui
+                let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
+                self.mouse_pos = (position.x as f32 / scale, position.y as f32 / scale);
             }
             
             WindowEvent::RedrawRequested => {
@@ -468,12 +510,24 @@ impl ApplicationHandler for DemoApp {
 
 impl Drop for DemoApp {
     fn drop(&mut self) {
+        // Wait for GPU to be idle before cleanup
+        if let Some(ctx) = &self.render_ctx {
+            unsafe { ctx.device.device_wait_idle().ok(); }
+        }
+        
+        // Drop simulation first (it has Vulkan resources from its own device)
+        drop(self.simulation.take());
+        
+        // Drop egui_renderer before render_ctx (it holds a cloned Device handle)
+        drop(self.egui_renderer.take());
+        
         // Clean up render pipeline before render context is dropped
         // Order matters: pipeline uses ctx's allocator
         if let (Some(pipeline), Some(ctx)) = (self.render_pipeline.as_mut(), self.render_ctx.as_ref()) {
             log::info!("Cleaning up render pipeline...");
             pipeline.destroy(ctx);
         }
+        
         // Now it's safe to drop the render_ctx and other resources
         log::info!("Demo app cleanup complete");
     }

@@ -26,6 +26,7 @@ ahash = "0.8"
 # GUI
 egui = "0.30"
 egui-winit = "0.30"
+egui-ash-renderer = "0.7"
 
 # Shader compilation
 shaderc = "0.8"

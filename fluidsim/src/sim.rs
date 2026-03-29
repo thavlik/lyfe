@@ -36,7 +36,7 @@ impl Default for SimulationConfig {
         Self {
             width: 512,
             height: 512,
-            diffusion_rate: 0.2,
+            diffusion_rate: 2.0,
             diffusion_substeps: 4,
             inspection_mip: 8,
         }
