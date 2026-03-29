@@ -67,6 +67,15 @@ impl RenderBuffer {
         mapped[..bytes.len()].copy_from_slice(bytes);
         Ok(())
     }
+
+    pub fn write_at<T: Pod>(&mut self, byte_offset: usize, data: &[T]) -> Result<()> {
+        let bytes = bytemuck::cast_slice(data);
+        let mapped = self.allocation.mapped_slice_mut()
+            .context("Buffer not mapped")?;
+        let end = byte_offset + bytes.len();
+        mapped[byte_offset..end].copy_from_slice(bytes);
+        Ok(())
+    }
 }
 
 /// Rendering pipeline for visualizing fluid simulation.
@@ -160,10 +169,11 @@ impl RenderPipeline {
             "render_temperatures",
         )?;
 
+        let staging_size = conc_size + mask_size + mask_size + temp_size;
         let staging_buffer = RenderBuffer::new(
             &ctx.device,
             &mut alloc,
-            conc_size.max(mask_size).max(temp_size),
+            staging_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::CpuToGpu,
             "render_staging",
@@ -426,23 +436,42 @@ impl RenderPipeline {
 
         let conc_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
         let mask_size = (self.cell_count * std::mem::size_of::<u32>()) as u64;
-
-        // Upload concentrations with barrier
-        self.staging_buffer.write(&flat_conc)?;
-        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.concentration_buffer.buffer, conc_size)?;
-
-        // Upload solid mask with barrier
-        self.staging_buffer.write(&state.solid_mask)?;
-        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.solid_mask_buffer.buffer, mask_size)?;
-
-        // Upload material IDs with barrier
-        self.staging_buffer.write(&state.material_ids)?;
-        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.material_id_buffer.buffer, mask_size)?;
-
-        // Upload temperatures with barrier
         let temp_size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
-        self.staging_buffer.write(&state.temperatures)?;
-        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.temperature_buffer.buffer, temp_size)?;
+
+        let conc_offset = 0usize;
+        let solid_offset = conc_offset + conc_size as usize;
+        let material_offset = solid_offset + mask_size as usize;
+        let temp_offset = material_offset + mask_size as usize;
+
+        self.staging_buffer.write_at(conc_offset, &flat_conc)?;
+        self.staging_buffer.write_at(solid_offset, &state.solid_mask)?;
+        self.staging_buffer.write_at(material_offset, &state.material_ids)?;
+        self.staging_buffer.write_at(temp_offset, &state.temperatures)?;
+
+        let copies = [
+            BufferCopyJob {
+                src_offset: conc_offset as u64,
+                dst: self.concentration_buffer.buffer,
+                size: conc_size,
+            },
+            BufferCopyJob {
+                src_offset: solid_offset as u64,
+                dst: self.solid_mask_buffer.buffer,
+                size: mask_size,
+            },
+            BufferCopyJob {
+                src_offset: material_offset as u64,
+                dst: self.material_id_buffer.buffer,
+                size: mask_size,
+            },
+            BufferCopyJob {
+                src_offset: temp_offset as u64,
+                dst: self.temperature_buffer.buffer,
+                size: temp_size,
+            },
+        ];
+
+        copy_buffer_batch_with_barriers(ctx, self.staging_buffer.buffer, &copies)?;
 
         Ok(())
     }
@@ -552,12 +581,21 @@ impl RenderPipeline {
     }
 }
 
-fn copy_buffer_with_barrier(
-    ctx: &RenderContext,
-    src: vk::Buffer,
+struct BufferCopyJob {
+    src_offset: u64,
     dst: vk::Buffer,
     size: u64,
+}
+
+fn copy_buffer_batch_with_barriers(
+    ctx: &RenderContext,
+    src: vk::Buffer,
+    jobs: &[BufferCopyJob],
 ) -> Result<()> {
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
     let alloc_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(ctx.command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
@@ -568,16 +606,23 @@ fn copy_buffer_with_barrier(
         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe { ctx.device.begin_command_buffer(cmd, &begin_info)? };
 
-    let copy_region = vk::BufferCopy::default().size(size);
-    unsafe { ctx.device.cmd_copy_buffer(cmd, src, dst, &[copy_region]) };
+    let mut barriers = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let copy_region = vk::BufferCopy::default()
+            .src_offset(job.src_offset)
+            .dst_offset(0)
+            .size(job.size);
+        unsafe { ctx.device.cmd_copy_buffer(cmd, src, job.dst, &[copy_region]) };
 
-    // Add memory barrier to make the transfer visible to shader reads
-    let barrier = vk::BufferMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::SHADER_READ)
-        .buffer(dst)
-        .offset(0)
-        .size(vk::WHOLE_SIZE);
+        barriers.push(
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(job.dst)
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+        );
+    }
 
     unsafe {
         ctx.device.cmd_pipeline_barrier(
@@ -586,7 +631,7 @@ fn copy_buffer_with_barrier(
             vk::PipelineStageFlags::FRAGMENT_SHADER,
             vk::DependencyFlags::empty(),
             &[],
-            &[barrier],
+            &barriers,
             &[],
         );
     }
