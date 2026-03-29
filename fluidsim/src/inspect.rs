@@ -127,9 +127,11 @@ impl InspectionResult {
         
         // Species concentrations
         if !self.species.is_empty() {
+            let mut species = self.species.clone();
+            species.sort_by(|a, b| b.concentration.total_cmp(&a.concentration));
             lines.push(String::new());
             lines.push("Species (M):".to_string());
-            for entry in &self.species {
+            for entry in &species {
                 lines.push(format!("  {}: {:.4}", entry.name, entry.concentration));
             }
         }
@@ -277,7 +279,7 @@ impl Inspector {
         }
         
         // Sort by concentration, highest first
-        species.sort_by(|a, b| b.concentration.partial_cmp(&a.concentration).unwrap());
+        species.sort_by(|a, b| b.concentration.total_cmp(&a.concentration));
         
         // Build material entries
         let mut materials = Vec::new();
