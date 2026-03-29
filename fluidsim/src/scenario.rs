@@ -343,7 +343,7 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
         outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
     );
 
-    let mut builder = builder.fill_temperature(293.15); // 20°C uniform
+    let mut builder = builder.fill_temperature(278.15); // 5°C uniform
 
     let h_id = builder.species_registry.id_of("H+").unwrap();
     let oh_id = builder.species_registry.id_of("OH-").unwrap();

@@ -139,6 +139,13 @@ impl SpeciesRegistry {
     pub fn diffusion_coefficients(&self) -> Vec<f32> {
         self.species.iter().map(|s| s.diffusion_coefficient).collect()
     }
+
+    /// Return the largest per-species diffusion coefficient (for CFL checks).
+    pub fn max_diffusion_coefficient(&self) -> f32 {
+        self.species.iter()
+            .map(|s| s.diffusion_coefficient)
+            .fold(0.0_f32, f32::max)
+    }
 }
 
 /// A map of species concentrations for a single cell.

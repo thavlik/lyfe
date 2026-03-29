@@ -1,0 +1,83 @@
+#version 450
+
+// Thermal diffusion compute shader
+//
+// Performs one explicit Euler step of heat diffusion on the temperature field:
+//   T_new[i] = T[i] + alpha * dt * sum(T[neighbor] - T[i])
+//
+// Layout: [cell]
+// Dispatch: (ceil(cell_count / 256), 1, 1)
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    float thermal_diffusivity;
+    float dt;
+    uint _pad[2];
+};
+
+layout(set = 0, binding = 0) readonly buffer SrcTemperatures {
+    float src_temp[];
+};
+
+layout(set = 0, binding = 1) writeonly buffer DstTemperatures {
+    float dst_temp[];
+};
+
+layout(set = 0, binding = 2) readonly buffer SolidMask {
+    uint solid_mask[];
+};
+
+void main() {
+    uint cell_index = gl_GlobalInvocationID.x;
+    uint cell_count = width * height;
+
+    if (cell_index >= cell_count) {
+        return;
+    }
+
+    float t = src_temp[cell_index];
+
+    if (solid_mask[cell_index] != 0) {
+        dst_temp[cell_index] = t;
+        return;
+    }
+
+    uint x = cell_index % width;
+    uint y = cell_index / width;
+
+    float flux = 0.0;
+
+    if (x > 0) {
+        uint left_idx = cell_index - 1;
+        if (solid_mask[left_idx] == 0) {
+            flux += src_temp[left_idx] - t;
+        }
+    }
+
+    if (x + 1 < width) {
+        uint right_idx = cell_index + 1;
+        if (solid_mask[right_idx] == 0) {
+            flux += src_temp[right_idx] - t;
+        }
+    }
+
+    if (y > 0) {
+        uint top_idx = cell_index - width;
+        if (solid_mask[top_idx] == 0) {
+            flux += src_temp[top_idx] - t;
+        }
+    }
+
+    if (y + 1 < height) {
+        uint bottom_idx = cell_index + width;
+        if (solid_mask[bottom_idx] == 0) {
+            flux += src_temp[bottom_idx] - t;
+        }
+    }
+
+    float new_t = t + thermal_diffusivity * dt * flux;
+    dst_temp[cell_index] = max(new_t, 0.0);
+}

@@ -86,6 +86,8 @@ pub struct InspectionResult {
     pub fluid_cell_count: u32,
     /// Number of solid cells in region
     pub solid_cell_count: u32,
+    /// Average temperature across the inspected region (Kelvin)
+    pub mean_temperature_kelvin: f64,
 }
 
 impl InspectionResult {
@@ -98,6 +100,7 @@ impl InspectionResult {
             materials: Vec::new(),
             fluid_cell_count: 0,
             solid_cell_count: 0,
+            mean_temperature_kelvin: 293.15,
         }
     }
 
@@ -115,6 +118,11 @@ impl InspectionResult {
         lines.push(format!(
             "Cells: {} fluid, {} solid",
             self.fluid_cell_count, self.solid_cell_count
+        ));
+        lines.push(format!(
+            "Temperature: {:.2} K ({:.2} C)",
+            self.mean_temperature_kelvin,
+            self.mean_temperature_kelvin - 273.15,
         ));
         
         // Species concentrations
@@ -188,6 +196,7 @@ impl Inspector {
         &self,
         coord: CoarseCellCoord,
         concentrations: &[Vec<f32>],
+        temperatures: &[f32],
         solid_mask: &[u32],
         material_ids: &[u32],
         grid_width: u32,
@@ -210,10 +219,16 @@ impl Inspector {
         let mut solid_count = 0u32;
         let mut species_sums = vec![0.0f64; species_registry.count()];
         let mut material_counts = vec![0u32; material_registry.count()];
+        let mut temperature_sum = 0.0f64;
+        let mut temperature_samples = 0u32;
         
         for y in y0..y1 {
             for x in x0..x1 {
                 let idx = (y * grid_width + x) as usize;
+                if let Some(&temperature) = temperatures.get(idx) {
+                    temperature_sum += temperature as f64;
+                    temperature_samples += 1;
+                }
                 
                 if solid_mask.get(idx).copied().unwrap_or(0) != 0 {
                     solid_count += 1;
@@ -280,6 +295,11 @@ impl Inspector {
         
         // Sort materials by fraction
         materials.sort_by(|a, b| b.fraction.partial_cmp(&a.fraction).unwrap());
+        let mean_temperature_kelvin = if temperature_samples > 0 {
+            temperature_sum / temperature_samples as f64
+        } else {
+            293.15
+        };
         
         InspectionResult {
             coord,
@@ -288,6 +308,7 @@ impl Inspector {
             materials,
             fluid_cell_count: fluid_count,
             solid_cell_count: solid_count,
+            mean_temperature_kelvin,
         }
     }
 }

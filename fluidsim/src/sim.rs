@@ -26,10 +26,21 @@ pub struct SimulationConfig {
     pub height: u32,
     /// Base diffusion rate multiplier
     pub diffusion_rate: f32,
-    /// Number of diffusion sub-steps per frame
+    /// Base thermal diffusion multiplier for the temperature field
+    pub thermal_diffusion_rate: f32,
+    /// Minimum diffusion sub-steps per frame (actual count is computed
+    /// dynamically from the CFL stability condition and may be higher)
     pub diffusion_substeps: u32,
     /// Default mip factor for inspection
     pub inspection_mip: u32,
+    /// Simulation time-scale multiplier.  Simulated dt per frame equals
+    /// `wall_dt * time_scale`, so 20.0 means the simulation runs 20×
+    /// faster than real-time.  Diffusion substeps are auto-scaled to
+    /// maintain numerical stability.
+    pub time_scale: f32,
+    /// Maximum wall-clock dt to accept per frame (seconds).  Prevents a
+    /// spiral-of-death when a frame takes too long.
+    pub max_frame_dt: f32,
 }
 
 impl Default for SimulationConfig {
@@ -37,9 +48,12 @@ impl Default for SimulationConfig {
         Self {
             width: 512,
             height: 512,
-            diffusion_rate: 2.0,
+            diffusion_rate: 5.0,
+            thermal_diffusion_rate: 3.0,
             diffusion_substeps: 4,
             inspection_mip: 8,
+            time_scale: 20.0,
+            max_frame_dt: 1.0 / 15.0,
         }
     }
 }
@@ -109,7 +123,7 @@ impl Simulation {
         let temperatures = scenario.compile_temperatures();
         let diffusion_coeffs = scenario.species_registry.diffusion_coefficients();
 
-        let gpu = GpuSimulation::new(
+        let mut gpu = GpuSimulation::new(
             scenario.grid.width,
             scenario.grid.height,
             scenario.species_registry.count(),
@@ -118,6 +132,8 @@ impl Simulation {
             &material_ids,
             &diffusion_coeffs,
         )?;
+
+        gpu.init_reaction_pipeline(&temperatures)?;
 
         Ok(Self {
             grid: scenario.grid,
@@ -152,33 +168,62 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
-    /// Step the simulation forward by dt seconds.
+    /// Step the simulation forward by dt seconds of wall-clock time.
+    ///
+    /// The actual simulated time is `dt * time_scale`.  Diffusion substeps
+    /// are computed dynamically so the CFL stability condition holds even
+    /// at high diffusion rates.
     pub fn step(&mut self, dt: f32) -> Result<()> {
         if self.paused {
             log::trace!("Simulation is paused, skipping step");
             return Ok(());
         }
 
-        // Run diffusion substeps
-        let substep_dt = dt / self.config.diffusion_substeps as f32;
-        log::trace!("Running {} substeps with dt={}, substep_dt={}, diffusion_rate={}",
-            self.config.diffusion_substeps, dt, substep_dt, self.config.diffusion_rate);
-        for i in 0..self.config.diffusion_substeps {
+        // Cap wall-clock dt, then apply time-scale
+        let wall_dt = dt.min(self.config.max_frame_dt);
+        let dt_sim = wall_dt * self.config.time_scale;
+
+        // Dynamic substep count: ensure explicit Euler stability for both
+        // concentration diffusion and thermal diffusion.
+        let species_d = self.config.diffusion_rate
+            * self.species_registry.max_diffusion_coefficient().max(1.0);
+        let max_d = species_d.max(self.config.thermal_diffusion_rate.max(0.0));
+        let cfl_substeps = if max_d > 0.0 {
+            ((max_d * dt_sim / 0.2).ceil() as u32).max(1)
+        } else {
+            1
+        };
+        let substeps = cfl_substeps.max(self.config.diffusion_substeps);
+        let substep_dt = dt_sim / substeps as f32;
+
+        log::trace!(
+            "time_scale={}, wall_dt={:.4}, dt_sim={:.4}, substeps={}, substep_dt={:.5}, diffusion_rate={}, thermal_diffusion_rate={}",
+            self.config.time_scale,
+            wall_dt,
+            dt_sim,
+            substeps,
+            substep_dt,
+            self.config.diffusion_rate,
+            self.config.thermal_diffusion_rate,
+        );
+        for i in 0..substeps {
             self.gpu.step(substep_dt, self.config.diffusion_rate)?;
+            self.gpu.step_temperature(substep_dt, self.config.thermal_diffusion_rate)?;
             log::trace!("Completed substep {}", i);
         }
 
-        // Run reaction pass (every frame, uses rules from last kinetics evaluation)
-        self.gpu.step_reactions(dt)?;
+        // Run reaction pass with the full simulated dt
+        self.gpu.step_reactions(dt_sim)?;
+        self.gpu.step_temperature(substep_dt, self.config.thermal_diffusion_rate)?;
 
-        self.time += dt as f64;
+        self.time += dt_sim as f64;
         self.step_count += 1;
         self.cache_dirty = true;
 
         // Kinetics evaluation (once per simulated second)
         // This is the semantic update engine that provides validated parameters
         let should_evaluate_kinetics = self.kinetics.as_mut()
-            .map(|k| k.accumulate_time(dt as f64))
+            .map(|k| k.accumulate_time(dt_sim as f64))
             .unwrap_or(false);
             
         if should_evaluate_kinetics {
@@ -267,6 +312,7 @@ impl Simulation {
         }
 
         self.cached_concentrations = Some(self.gpu.read_concentrations()?);
+        self.cached_temperatures = Some(self.gpu.read_temperatures()?);
         
         if self.cached_solid_mask.is_none() {
             self.cached_solid_mask = Some(self.gpu.read_solid_mask()?);
@@ -293,6 +339,7 @@ impl Simulation {
         let result = self.inspector.inspect(
             coord,
             self.cached_concentrations.as_ref().unwrap(),
+            self.cached_temperatures.as_ref().unwrap(),
             self.cached_solid_mask.as_ref().unwrap(),
             self.cached_material_ids.as_ref().unwrap(),
             self.grid.width,

@@ -117,9 +117,12 @@ impl DemoApp {
         let config = SimulationConfig {
             width: 512,
             height: 512,
-            diffusion_rate: 2.0,
+            diffusion_rate: 5.0,
+            thermal_diffusion_rate: 3.0,
             diffusion_substeps: 4,
             inspection_mip: self.inspection_mip,
+            time_scale: 20.0,
+            max_frame_dt: 1.0 / 15.0,
         };
         
         let simulation = match self.scenario {

@@ -60,6 +60,17 @@ pub struct ReactionPushConstants {
     pub _pad: [u32; 3],
 }
 
+/// Push constants for the thermal diffusion compute shader.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ThermalPushConstants {
+    pub width: u32,
+    pub height: u32,
+    pub thermal_diffusivity: f32,
+    pub dt: f32,
+    pub _pad: [u32; 2],
+}
+
 /// A single GPU-packed reaction rule (4 × u32).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -87,14 +98,22 @@ const MAX_REACTION_RULES: usize = 16;
 /// Optional reaction pipeline state.
 /// Created lazily when reaction rules are first uploaded.
 pub struct ReactionPipelineState {
-    pub descriptor_set_layout: vk::DescriptorSetLayout,
-    pub pipeline_layout: vk::PipelineLayout,
-    pub pipeline: vk::Pipeline,
-    pub descriptor_pool: vk::DescriptorPool,
-    /// Two descriptor sets: [0] reads buffer A, [1] reads buffer B
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
-    /// Temperature buffer (GPU-only, per-cell f32 Kelvin)
-    pub temperature_buffer: GpuBuffer,
+    pub reaction_descriptor_set_layout: vk::DescriptorSetLayout,
+    pub reaction_pipeline_layout: vk::PipelineLayout,
+    pub reaction_pipeline: vk::Pipeline,
+    pub reaction_descriptor_pool: vk::DescriptorPool,
+    /// Four descriptor sets: concentration current buffer × temperature current buffer.
+    pub reaction_descriptor_sets: Vec<vk::DescriptorSet>,
+    /// Temperature buffers (GPU-only, per-cell f32 Kelvin)
+    pub temperature_buffer_a: GpuBuffer,
+    pub temperature_buffer_b: GpuBuffer,
+    pub temperature_current_buffer: usize,
+    pub thermal_descriptor_set_layout: vk::DescriptorSetLayout,
+    pub thermal_pipeline_layout: vk::PipelineLayout,
+    pub thermal_pipeline: vk::Pipeline,
+    pub thermal_descriptor_pool: vk::DescriptorPool,
+    /// Two descriptor sets: [0] = A->B, [1] = B->A.
+    pub thermal_descriptor_sets: Vec<vk::DescriptorSet>,
     /// Reaction rules buffer (CPU-visible, small)
     pub rules_buffer: GpuBuffer,
     /// Number of currently active reaction rules
@@ -709,6 +728,108 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
+    fn reaction_descriptor_index(conc_current_buffer: usize, temperature_current_buffer: usize) -> usize {
+        conc_current_buffer * 2 + temperature_current_buffer
+    }
+
+    fn update_reaction_descriptor_set(
+        device: &ash::Device,
+        set: vk::DescriptorSet,
+        conc_buffer: vk::Buffer,
+        mask_buffer: vk::Buffer,
+        temperature_buffer: vk::Buffer,
+        rules_buffer: vk::Buffer,
+        conc_size: u64,
+        mask_size: u64,
+        temperature_size: u64,
+        rules_size: u64,
+    ) {
+        let conc_info = [vk::DescriptorBufferInfo::default()
+            .buffer(conc_buffer)
+            .offset(0)
+            .range(conc_size)];
+        let mask_info = [vk::DescriptorBufferInfo::default()
+            .buffer(mask_buffer)
+            .offset(0)
+            .range(mask_size)];
+        let temp_info = [vk::DescriptorBufferInfo::default()
+            .buffer(temperature_buffer)
+            .offset(0)
+            .range(temperature_size)];
+        let rules_info = [vk::DescriptorBufferInfo::default()
+            .buffer(rules_buffer)
+            .offset(0)
+            .range(rules_size)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&conc_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&mask_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&temp_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&rules_info),
+        ];
+
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+    }
+
+    fn update_thermal_descriptor_set(
+        device: &ash::Device,
+        set: vk::DescriptorSet,
+        src_temperature_buffer: vk::Buffer,
+        dst_temperature_buffer: vk::Buffer,
+        mask_buffer: vk::Buffer,
+        temperature_size: u64,
+        mask_size: u64,
+    ) {
+        let src_info = [vk::DescriptorBufferInfo::default()
+            .buffer(src_temperature_buffer)
+            .offset(0)
+            .range(temperature_size)];
+        let dst_info = [vk::DescriptorBufferInfo::default()
+            .buffer(dst_temperature_buffer)
+            .offset(0)
+            .range(temperature_size)];
+        let mask_info = [vk::DescriptorBufferInfo::default()
+            .buffer(mask_buffer)
+            .offset(0)
+            .range(mask_size)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&src_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&dst_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&mask_info),
+        ];
+
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+    }
+
     /// Run one diffusion step on the GPU.
     pub fn step(&mut self, dt: f32, diffusion_rate: f32) -> Result<()> {
         let push_constants = DiffusionPushConstants {
@@ -875,6 +996,35 @@ impl GpuSimulation {
         self.readback_buffer.read(self.cell_count)
     }
 
+    /// Read back per-cell temperatures in Kelvin.
+    pub fn read_temperatures(&mut self) -> Result<Vec<f32>> {
+        let rxn = match &self.reaction {
+            Some(r) => r,
+            None => return Ok(vec![293.15; self.cell_count]),
+        };
+
+        let temperature_buffer = if rxn.temperature_current_buffer == 0 {
+            rxn.temperature_buffer_a.buffer
+        } else {
+            rxn.temperature_buffer_b.buffer
+        };
+
+        let size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
+
+        Self::copy_buffer_sync(
+            &self.device,
+            self.command_pool,
+            self.compute_queue,
+            self.fence,
+            temperature_buffer,
+            self.readback_buffer.buffer,
+            size,
+            Some(self.command_buffer),
+        )?;
+
+        self.readback_buffer.read(self.cell_count)
+    }
+
     /// Get the current concentration buffer for rendering.
     pub fn current_concentration_buffer(&self) -> vk::Buffer {
         if self.current_buffer == 0 {
@@ -899,14 +1049,26 @@ impl GpuSimulation {
 
         let mut alloc = self.allocator.as_ref().unwrap().lock();
 
-        // GPU-only temperature buffer
-        let temperature_buffer = GpuBuffer::new(
+        let temperature_buffer_a = GpuBuffer::new(
             &self.device,
             &mut alloc,
             temp_buffer_size,
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::GpuOnly,
-            "temperature",
+            "temperature_a",
+        )?;
+
+        let temperature_buffer_b = GpuBuffer::new(
+            &self.device,
+            &mut alloc,
+            temp_buffer_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::GpuOnly,
+            "temperature_b",
         )?;
 
         // CPU-visible reaction rules buffer
@@ -929,32 +1091,55 @@ impl GpuSimulation {
             self.compute_queue,
             self.fence,
             self.staging_buffer.buffer,
-            temperature_buffer.buffer,
+            temperature_buffer_a.buffer,
+            temp_buffer_size,
+            Some(self.command_buffer),
+        )?;
+        Self::copy_buffer_sync(
+            &self.device,
+            self.command_pool,
+            self.compute_queue,
+            self.fence,
+            self.staging_buffer.buffer,
+            temperature_buffer_b.buffer,
             temp_buffer_size,
             Some(self.command_buffer),
         )?;
 
-        // Compile reaction shader
-        let shader_source = include_str!("../shaders/reaction.comp");
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
         let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
         options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
         options.set_optimization_level(shaderc::OptimizationLevel::Performance);
 
-        let spirv = compiler.compile_into_spirv(
-            shader_source,
+        let reaction_spirv = compiler.compile_into_spirv(
+            include_str!("../shaders/reaction.comp"),
             shaderc::ShaderKind::Compute,
             "reaction.comp",
             "main",
             Some(&options),
         ).context("Failed to compile reaction shader")?;
 
-        let shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(spirv.as_binary());
-        let shader_module = unsafe { self.device.create_shader_module(&shader_module_info, None)? };
+        let thermal_spirv = compiler.compile_into_spirv(
+            include_str!("../shaders/thermal_diffusion.comp"),
+            shaderc::ShaderKind::Compute,
+            "thermal_diffusion.comp",
+            "main",
+            Some(&options),
+        ).context("Failed to compile thermal diffusion shader")?;
 
-        // Descriptor set layout: 4 bindings
-        let bindings = [
+        let reaction_shader_module_info = vk::ShaderModuleCreateInfo::default()
+            .code(reaction_spirv.as_binary());
+        let reaction_shader_module = unsafe {
+            self.device.create_shader_module(&reaction_shader_module_info, None)?
+        };
+
+        let thermal_shader_module_info = vk::ShaderModuleCreateInfo::default()
+            .code(thermal_spirv.as_binary());
+        let thermal_shader_module = unsafe {
+            self.device.create_shader_module(&thermal_shader_module_info, None)?
+        };
+
+        let reaction_bindings = [
             // 0: Concentrations (read-write)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -981,89 +1166,192 @@ impl GpuSimulation {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&bindings);
-        let descriptor_set_layout = unsafe { self.device.create_descriptor_set_layout(&layout_info, None)? };
+        let reaction_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&reaction_bindings);
+        let reaction_descriptor_set_layout = unsafe {
+            self.device.create_descriptor_set_layout(&reaction_layout_info, None)?
+        };
 
-        let push_constant_range = vk::PushConstantRange::default()
+        let reaction_push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
             .size(std::mem::size_of::<ReactionPushConstants>() as u32);
 
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&descriptor_set_layout))
-            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-        let pipeline_layout = unsafe { self.device.create_pipeline_layout(&pipeline_layout_info, None)? };
+        let reaction_pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&reaction_descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&reaction_push_constant_range));
+        let reaction_pipeline_layout = unsafe {
+            self.device.create_pipeline_layout(&reaction_pipeline_layout_info, None)?
+        };
 
         let entry_name = c"main";
-        let stage_info = vk::PipelineShaderStageCreateInfo::default()
+        let reaction_stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
-            .module(shader_module)
+            .module(reaction_shader_module)
             .name(entry_name);
 
-        let pipeline_info = vk::ComputePipelineCreateInfo::default()
-            .stage(stage_info)
-            .layout(pipeline_layout);
+        let reaction_pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(reaction_stage_info)
+            .layout(reaction_pipeline_layout);
 
-        let pipeline = unsafe {
-            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        let reaction_pipeline = unsafe {
+            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[reaction_pipeline_info], None)
                 .map_err(|e| anyhow::anyhow!("Failed to create reaction pipeline: {:?}", e.1))?[0]
         };
 
-        unsafe { self.device.destroy_shader_module(shader_module, None) };
+        let thermal_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
 
-        // Descriptor pool: 4 bindings × 2 sets = 8
-        let pool_sizes = [
+        let thermal_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&thermal_bindings);
+        let thermal_descriptor_set_layout = unsafe {
+            self.device.create_descriptor_set_layout(&thermal_layout_info, None)?
+        };
+
+        let thermal_push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(std::mem::size_of::<ThermalPushConstants>() as u32);
+
+        let thermal_pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&thermal_descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&thermal_push_constant_range));
+        let thermal_pipeline_layout = unsafe {
+            self.device.create_pipeline_layout(&thermal_pipeline_layout_info, None)?
+        };
+
+        let thermal_stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(thermal_shader_module)
+            .name(entry_name);
+
+        let thermal_pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(thermal_stage_info)
+            .layout(thermal_pipeline_layout);
+
+        let thermal_pipeline = unsafe {
+            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[thermal_pipeline_info], None)
+                .map_err(|e| anyhow::anyhow!("Failed to create thermal pipeline: {:?}", e.1))?[0]
+        };
+
+        unsafe {
+            self.device.destroy_shader_module(reaction_shader_module, None);
+            self.device.destroy_shader_module(thermal_shader_module, None);
+        };
+
+        let reaction_pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(8),
+                .descriptor_count(16),
         ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(2)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool = unsafe { self.device.create_descriptor_pool(&pool_info, None)? };
+        let reaction_pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(4)
+            .pool_sizes(&reaction_pool_sizes);
+        let reaction_descriptor_pool = unsafe {
+            self.device.create_descriptor_pool(&reaction_pool_info, None)?
+        };
 
-        let layouts = [descriptor_set_layout, descriptor_set_layout];
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&layouts);
-        let descriptor_sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
+        let reaction_layouts = [
+            reaction_descriptor_set_layout,
+            reaction_descriptor_set_layout,
+            reaction_descriptor_set_layout,
+            reaction_descriptor_set_layout,
+        ];
+        let reaction_alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(reaction_descriptor_pool)
+            .set_layouts(&reaction_layouts);
+        let reaction_descriptor_sets = unsafe {
+            self.device.allocate_descriptor_sets(&reaction_alloc_info)?
+        };
 
-        // Update descriptor sets (set 0 reads conc_buffer_a, set 1 reads conc_buffer_b)
-        for (i, &conc_buf) in [self.conc_buffer_a.buffer, self.conc_buffer_b.buffer].iter().enumerate() {
-            let conc_info = [vk::DescriptorBufferInfo::default()
-                .buffer(conc_buf).offset(0).range(conc_buffer_size)];
-            let mask_info = [vk::DescriptorBufferInfo::default()
-                .buffer(self.solid_mask.buffer).offset(0).range(mask_buffer_size)];
-            let temp_info = [vk::DescriptorBufferInfo::default()
-                .buffer(temperature_buffer.buffer).offset(0).range(temp_buffer_size)];
-            let rules_info = [vk::DescriptorBufferInfo::default()
-                .buffer(rules_buffer.buffer).offset(0).range(rules_buffer_size)];
-
-            let writes = [
-                vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_sets[i]).dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&conc_info),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_sets[i]).dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&mask_info),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_sets[i]).dst_binding(2)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&temp_info),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_sets[i]).dst_binding(3)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&rules_info),
-            ];
-            unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        let conc_buffers = [self.conc_buffer_a.buffer, self.conc_buffer_b.buffer];
+        let temp_buffers = [temperature_buffer_a.buffer, temperature_buffer_b.buffer];
+        for (conc_index, &conc_buf) in conc_buffers.iter().enumerate() {
+            for (temp_index, &temp_buf) in temp_buffers.iter().enumerate() {
+                let set_index = Self::reaction_descriptor_index(conc_index, temp_index);
+                Self::update_reaction_descriptor_set(
+                    &self.device,
+                    reaction_descriptor_sets[set_index],
+                    conc_buf,
+                    self.solid_mask.buffer,
+                    temp_buf,
+                    rules_buffer.buffer,
+                    conc_buffer_size,
+                    mask_buffer_size,
+                    temp_buffer_size,
+                    rules_buffer_size,
+                );
+            }
         }
 
+        let thermal_pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(6),
+        ];
+        let thermal_pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(2)
+            .pool_sizes(&thermal_pool_sizes);
+        let thermal_descriptor_pool = unsafe {
+            self.device.create_descriptor_pool(&thermal_pool_info, None)?
+        };
+
+        let thermal_layouts = [thermal_descriptor_set_layout, thermal_descriptor_set_layout];
+        let thermal_alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(thermal_descriptor_pool)
+            .set_layouts(&thermal_layouts);
+        let thermal_descriptor_sets = unsafe {
+            self.device.allocate_descriptor_sets(&thermal_alloc_info)?
+        };
+
+        Self::update_thermal_descriptor_set(
+            &self.device,
+            thermal_descriptor_sets[0],
+            temperature_buffer_a.buffer,
+            temperature_buffer_b.buffer,
+            self.solid_mask.buffer,
+            temp_buffer_size,
+            mask_buffer_size,
+        );
+        Self::update_thermal_descriptor_set(
+            &self.device,
+            thermal_descriptor_sets[1],
+            temperature_buffer_b.buffer,
+            temperature_buffer_a.buffer,
+            self.solid_mask.buffer,
+            temp_buffer_size,
+            mask_buffer_size,
+        );
+
         self.reaction = Some(ReactionPipelineState {
-            descriptor_set_layout,
-            pipeline_layout,
-            pipeline,
-            descriptor_pool,
-            descriptor_sets,
-            temperature_buffer,
+            reaction_descriptor_set_layout,
+            reaction_pipeline_layout,
+            reaction_pipeline,
+            reaction_descriptor_pool,
+            reaction_descriptor_sets,
+            temperature_buffer_a,
+            temperature_buffer_b,
+            temperature_current_buffer: 0,
+            thermal_descriptor_set_layout,
+            thermal_pipeline_layout,
+            thermal_pipeline,
+            thermal_descriptor_pool,
+            thermal_descriptor_sets,
             rules_buffer,
             active_rule_count: 0,
             rule_set_hash: 0,
@@ -1130,8 +1418,8 @@ impl GpuSimulation {
     /// in place (not ping-pong).
     pub fn step_reactions(&mut self, dt: f32) -> Result<()> {
         let rxn = match &self.reaction {
-            Some(r) if r.active_rule_count > 0 => r,
-            _ => return Ok(()), // No reactions to apply
+            Some(r) => r,
+            None => return Ok(()),
         };
 
         let push = ReactionPushConstants {
@@ -1144,7 +1432,9 @@ impl GpuSimulation {
         };
 
         // The reaction shader reads/writes the CURRENT buffer in-place
-        let descriptor_set = rxn.descriptor_sets[self.current_buffer];
+        let descriptor_set = rxn.reaction_descriptor_sets[
+            Self::reaction_descriptor_index(self.current_buffer, rxn.temperature_current_buffer)
+        ];
 
         unsafe {
             self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
@@ -1156,13 +1446,13 @@ impl GpuSimulation {
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
-                rxn.pipeline,
+                rxn.reaction_pipeline,
             );
 
             self.device.cmd_bind_descriptor_sets(
                 self.command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
-                rxn.pipeline_layout,
+                rxn.reaction_pipeline_layout,
                 0,
                 &[descriptor_set],
                 &[],
@@ -1170,7 +1460,7 @@ impl GpuSimulation {
 
             self.device.cmd_push_constants(
                 self.command_buffer,
-                rxn.pipeline_layout,
+                rxn.reaction_pipeline_layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
                 bytemuck::bytes_of(&push),
@@ -1192,6 +1482,72 @@ impl GpuSimulation {
 
         Ok(())
     }
+
+    /// Run one thermal diffusion step on the current temperature buffer.
+    pub fn step_temperature(&mut self, dt: f32, thermal_diffusivity: f32) -> Result<()> {
+        let rxn = match &mut self.reaction {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+
+        let push_constants = ThermalPushConstants {
+            width: self.width,
+            height: self.height,
+            thermal_diffusivity,
+            dt,
+            _pad: [0; 2],
+        };
+        let descriptor_set = rxn.thermal_descriptor_sets[rxn.temperature_current_buffer];
+        let pipeline = rxn.thermal_pipeline;
+        let pipeline_layout = rxn.thermal_pipeline_layout;
+
+        unsafe {
+            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+
+            self.device.cmd_bind_pipeline(
+                self.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline,
+            );
+
+            self.device.cmd_bind_descriptor_sets(
+                self.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+
+            self.device.cmd_push_constants(
+                self.command_buffer,
+                pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&push_constants),
+            );
+
+            let workgroup_size = 256u32;
+            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(self.command_buffer, num_groups, 1, 1);
+
+            self.device.end_command_buffer(self.command_buffer)?;
+
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&self.command_buffer));
+
+            self.device.reset_fences(&[self.fence])?;
+            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
+        }
+
+        rxn.temperature_current_buffer = 1 - rxn.temperature_current_buffer;
+        Ok(())
+    }
 }
 
 impl Drop for GpuSimulation {
@@ -1210,14 +1566,20 @@ impl Drop for GpuSimulation {
 
             // Clean up reaction pipeline if present
             if let Some(mut rxn) = self.reaction.take() {
-                self.device.destroy_descriptor_pool(rxn.descriptor_pool, None);
-                self.device.destroy_pipeline(rxn.pipeline, None);
-                self.device.destroy_pipeline_layout(rxn.pipeline_layout, None);
-                self.device.destroy_descriptor_set_layout(rxn.descriptor_set_layout, None);
+                self.device.destroy_descriptor_pool(rxn.reaction_descriptor_pool, None);
+                self.device.destroy_pipeline(rxn.reaction_pipeline, None);
+                self.device.destroy_pipeline_layout(rxn.reaction_pipeline_layout, None);
+                self.device.destroy_descriptor_set_layout(rxn.reaction_descriptor_set_layout, None);
+                self.device.destroy_descriptor_pool(rxn.thermal_descriptor_pool, None);
+                self.device.destroy_pipeline(rxn.thermal_pipeline, None);
+                self.device.destroy_pipeline_layout(rxn.thermal_pipeline_layout, None);
+                self.device.destroy_descriptor_set_layout(rxn.thermal_descriptor_set_layout, None);
 
                 let mut alloc = self.allocator.as_ref().unwrap().lock();
-                self.device.destroy_buffer(rxn.temperature_buffer.buffer, None);
-                alloc.free(std::mem::take(&mut rxn.temperature_buffer.allocation)).ok();
+                self.device.destroy_buffer(rxn.temperature_buffer_a.buffer, None);
+                alloc.free(std::mem::take(&mut rxn.temperature_buffer_a.allocation)).ok();
+                self.device.destroy_buffer(rxn.temperature_buffer_b.buffer, None);
+                alloc.free(std::mem::take(&mut rxn.temperature_buffer_b.allocation)).ok();
                 self.device.destroy_buffer(rxn.rules_buffer.buffer, None);
                 alloc.free(std::mem::take(&mut rxn.rules_buffer.allocation)).ok();
                 drop(alloc);
