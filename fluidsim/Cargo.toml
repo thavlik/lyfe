@@ -19,3 +19,6 @@ parking_lot.workspace = true
 ahash.workspace = true
 shaderc.workspace = true
 raw-window-handle.workspace = true
+
+# Kinetics integration
+kinetics.workspace = true

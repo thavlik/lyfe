@@ -306,3 +306,86 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
     
     builder.build()
 }
+
+/// Create the acid-base neutralization scenario.
+///
+/// Top-left region: 1.0 M H⁺ + 0.5 M SO₄²⁻ (acidic solution)
+/// Bottom-right region: 1.0 M Na⁺ + 1.0 M OH⁻ (basic solution)
+///
+/// When they mix, kinetics drives: H⁺ + OH⁻ → H₂O
+pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
+    let wall_thickness = 4u32;
+    let inner_size = (width.min(height) / 2).max(64);
+    let outer_size = inner_size + 2 * wall_thickness;
+
+    let center_x = width / 2;
+    let center_y = height / 2;
+
+    let outer_x0 = center_x - outer_size / 2;
+    let outer_y0 = center_y - outer_size / 2;
+    let outer_x1 = outer_x0 + outer_size;
+    let outer_y1 = outer_y0 + outer_size;
+
+    let inner_x0 = outer_x0 + wall_thickness;
+    let inner_y0 = outer_y0 + wall_thickness;
+    let inner_x1 = outer_x1 - wall_thickness;
+    let inner_y1 = outer_y1 - wall_thickness;
+
+    let builder = ScenarioBuilder::new(width, height)
+        .register_species("H+")
+        .register_species("OH-")
+        .register_species("Na+")
+        .register_species("SO4(2-)");
+
+    let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
+
+    let builder = builder.fill_hollow_rect(
+        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+    );
+
+    let mut builder = builder.fill_temperature(293.15); // 20°C uniform
+
+    let h_id = builder.species_registry.id_of("H+").unwrap();
+    let oh_id = builder.species_registry.id_of("OH-").unwrap();
+    let na_id = builder.species_registry.id_of("Na+").unwrap();
+    let so4_id = builder.species_registry.id_of("SO4(2-)").unwrap();
+
+    let inner_width = (inner_x1 - inner_x0) as f32;
+    let inner_height = (inner_y1 - inner_y0) as f32;
+
+    for y in inner_y0..inner_y1 {
+        for x in inner_x0..inner_x1 {
+            let index = builder.grid.index_of(CellCoord::new(x, y));
+            if builder.solid_geometry.is_solid(index) {
+                continue;
+            }
+
+            let nx = (x - inner_x0) as f32 / inner_width;
+            let ny = (y - inner_y0) as f32 / inner_height;
+
+            if nx + ny < 1.0 {
+                // Top-left: acidic — 1.0 M H⁺, 0.5 M SO₄²⁻
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(h_id, 1.0);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(so4_id, 0.5);
+            } else {
+                // Bottom-right: basic — 1.0 M Na⁺, 1.0 M OH⁻
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(na_id, 1.0);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(oh_id, 1.0);
+            }
+        }
+    }
+
+    builder.build()
+}

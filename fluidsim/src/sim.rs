@@ -9,7 +9,8 @@ use crate::coarse::CoarseCellData;
 use crate::gpu::GpuSimulation;
 use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
-use crate::scenario::{Scenario, create_demo_scenario};
+use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
+use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario};
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
@@ -93,6 +94,10 @@ pub struct Simulation {
     step_count: u64,
     /// Is simulation paused
     paused: bool,
+    /// Kinetics integration (semantic update engine)
+    kinetics: Option<KineticsIntegration>,
+    /// Semantic update applicator
+    update_applicator: SemanticUpdateApplicator,
 }
 
 impl Simulation {
@@ -130,12 +135,20 @@ impl Simulation {
             time: 0.0,
             step_count: 0,
             paused: false,
+            kinetics: KineticsIntegration::new().ok(),
+            update_applicator: SemanticUpdateApplicator::new(),
         })
     }
 
     /// Create the demo simulation.
     pub fn new_demo(config: SimulationConfig) -> Result<Self> {
         let scenario = create_demo_scenario(config.width, config.height);
+        Self::from_scenario(scenario, config)
+    }
+
+    /// Create the acid-base neutralization simulation.
+    pub fn new_acid_base(config: SimulationConfig) -> Result<Self> {
+        let scenario = create_acid_base_scenario(config.width, config.height);
         Self::from_scenario(scenario, config)
     }
 
@@ -155,12 +168,80 @@ impl Simulation {
             log::trace!("Completed substep {}", i);
         }
 
-        // Evolution rule would be applied here
-        // Currently no-op, but the hook is in place
+        // Run reaction pass (every frame, uses rules from last kinetics evaluation)
+        self.gpu.step_reactions(dt)?;
 
         self.time += dt as f64;
         self.step_count += 1;
         self.cache_dirty = true;
+
+        // Kinetics evaluation (once per simulated second)
+        // This is the semantic update engine that provides validated parameters
+        let should_evaluate_kinetics = self.kinetics.as_mut()
+            .map(|k| k.accumulate_time(dt as f64))
+            .unwrap_or(false);
+            
+        if should_evaluate_kinetics {
+            // Time to do a semantic evaluation
+            self.refresh_cache()?;
+            
+            // Gather data needed for kinetics evaluation
+            let fine_width = self.grid.width;
+            let fine_height = self.grid.height;
+            let sim_time = self.time;
+            let concentrations = self.cached_concentrations.as_ref().unwrap().clone();
+            let solid_mask = self.cached_solid_mask.as_ref().unwrap().clone();
+            let material_ids = self.cached_material_ids.as_ref().unwrap().clone();
+            let temperatures = self.cached_temperatures.clone()
+                .unwrap_or_else(|| vec![293.15; (fine_width * fine_height) as usize]);
+            
+            // Clone registries for the evaluate call (they're cheap to clone)
+            let species_registry = self.species_registry.clone();
+            let material_registry = self.material_registry.clone();
+            
+            // Now we can safely borrow kinetics mutably
+            if let Some(ref mut kinetics) = self.kinetics {
+                match kinetics.evaluate(
+                    fine_width,
+                    fine_height,
+                    sim_time,
+                    &concentrations,
+                    &solid_mask,
+                    &material_ids,
+                    &temperatures,
+                    &species_registry,
+                    &material_registry,
+                ) {
+                    Ok(update) => {
+                        // Apply the semantic update to get GPU reaction rules
+                        let (_applied, gpu_rules) = self.update_applicator.apply(
+                            update,
+                            &species_registry,
+                            &mut self.material_registry,
+                        );
+
+                        // Initialize reaction pipeline if we have rules and haven't yet
+                        if !gpu_rules.is_empty() && self.gpu.reaction.is_none() {
+                            let temps = temperatures.clone();
+                            if let Err(e) = self.gpu.init_reaction_pipeline(&temps) {
+                                log::error!("Failed to initialize reaction pipeline: {}", e);
+                            }
+                        }
+
+                        // Upload reaction rules to GPU (tracking avoids redundant uploads)
+                        if !gpu_rules.is_empty() {
+                            if let Err(e) = self.gpu.upload_reaction_rules(&gpu_rules) {
+                                log::error!("Failed to upload reaction rules: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Kinetics evaluation failed: {}", e);
+                        // Continue with existing parameters - simulation stays stable
+                    }
+                }
+            }
+        }
 
         // Log sample concentrations every 60 steps
         if self.step_count % 60 == 1 {
@@ -381,5 +462,46 @@ impl Simulation {
     /// Get the mip factor used for coarse grid.
     pub fn coarse_mip_factor(&self) -> Option<u32> {
         self.gpu.coarse_grid.as_ref().map(|c| c.mip_factor)
+    }
+
+    // ============ Kinetics Integration API ============
+
+    /// Check if kinetics integration is enabled.
+    pub fn has_kinetics(&self) -> bool {
+        self.kinetics.is_some()
+    }
+
+    /// Get the kinetics integration (if enabled).
+    pub fn kinetics(&self) -> Option<&KineticsIntegration> {
+        self.kinetics.as_ref()
+    }
+
+    /// Get mutable access to kinetics integration.
+    pub fn kinetics_mut(&mut self) -> Option<&mut KineticsIntegration> {
+        self.kinetics.as_mut()
+    }
+
+    /// Get the last semantic update from kinetics (if any).
+    pub fn last_semantic_update(&self) -> Option<&kinetics::SemanticUpdate> {
+        self.kinetics.as_ref().and_then(|k| k.last_update())
+    }
+
+    /// Get the time since last kinetics evaluation.
+    pub fn time_since_kinetics_evaluation(&self) -> f64 {
+        self.kinetics.as_ref()
+            .map(|k| k.time_since_last_evaluation())
+            .unwrap_or(0.0)
+    }
+
+    /// Set the kinetics evaluation interval.
+    pub fn set_kinetics_interval(&mut self, interval_seconds: f64) {
+        if let Some(ref mut k) = self.kinetics {
+            k.set_evaluation_interval(interval_seconds);
+        }
+    }
+
+    /// Get kinetics integration statistics.
+    pub fn kinetics_stats(&self) -> Option<&crate::kinetics_integration::IntegrationStats> {
+        self.kinetics.as_ref().map(|k| k.stats())
     }
 }

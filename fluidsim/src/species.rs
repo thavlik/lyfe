@@ -104,6 +104,12 @@ impl SpeciesRegistry {
         self.id_to_index.get(&id).copied()
     }
 
+    /// Get the dense index for a species by name.
+    pub fn index_of_name(&self, name: &str) -> Option<usize> {
+        let id = self.name_to_id.get(name)?;
+        self.id_to_index.get(id).copied()
+    }
+
     /// Get the species ID for a name.
     pub fn id_of(&self, name: &str) -> Option<SpeciesId> {
         self.name_to_id.get(name).copied()

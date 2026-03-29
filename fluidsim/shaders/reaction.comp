@@ -1,0 +1,108 @@
+#version 450
+
+// Reaction compute shader
+//
+// Applies reaction rules to concentrations.
+// Each rule has the form:  reactant_a + reactant_b → products
+// with a rate constant, enthalpy delta, and activation energy.
+//
+// The shader consumes the limiting reactant at a rate determined by:
+//   extent = min(c_a, c_b) * effective_rate * dt
+// where effective_rate incorporates Arrhenius temperature dependence.
+//
+// Layout: [species][cell] where cell = y * width + x
+// Dispatch: (ceil(cell_count / 256), 1, 1)
+//
+// This shader reads and writes the SAME buffer (in-place update)
+// because it runs as a separate pass after diffusion has completed
+// and before the next frame's diffusion begins.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint species_count;
+    uint num_reactions;          // number of active reaction rules
+    float dt;
+    uint _pad[3];
+};
+
+// A single reaction rule, tightly packed for GPU.
+struct ReactionRule {
+    uint reactant_a_index;       // species dense index of first reactant
+    uint reactant_b_index;       // species dense index of second reactant
+    float rate_constant;         // effective rate (pre-scaled for simulation)
+    float enthalpy_delta;        // J/mol (negative = exothermic)
+};
+
+// Binding 0: Concentration buffer (read-write, in-place)
+layout(set = 0, binding = 0) buffer Concentrations {
+    float conc[];
+};
+
+// Binding 1: Solid mask
+layout(set = 0, binding = 1) readonly buffer SolidMask {
+    uint solid_mask[];
+};
+
+// Binding 2: Temperature buffer (read-write for enthalpy effects)
+layout(set = 0, binding = 2) buffer Temperatures {
+    float temperatures[];
+};
+
+// Binding 3: Reaction rules buffer
+layout(set = 0, binding = 3) readonly buffer ReactionRules {
+    // Packed as: [reactant_a_index, reactant_b_index, rate_constant_bits, enthalpy_bits] per rule
+    uint reaction_data[];
+};
+
+void main() {
+    uint cell_index = gl_GlobalInvocationID.x;
+    uint cell_count = width * height;
+
+    if (cell_index >= cell_count) {
+        return;
+    }
+
+    // Solid cells don't react
+    if (solid_mask[cell_index] != 0) {
+        return;
+    }
+
+    // Apply each reaction rule
+    for (uint r = 0; r < num_reactions; r++) {
+        uint base = r * 4;
+        uint idx_a = reaction_data[base + 0];
+        uint idx_b = reaction_data[base + 1];
+        float k = uintBitsToFloat(reaction_data[base + 2]);
+        float dH = uintBitsToFloat(reaction_data[base + 3]);
+
+        // Read current concentrations of reactants
+        float c_a = conc[idx_a * cell_count + cell_index];
+        float c_b = conc[idx_b * cell_count + cell_index];
+
+        // Reaction extent: second-order kinetics limited by both reactants
+        // extent = k * c_a * c_b * dt, clamped to not exceed either reactant
+        float extent = k * c_a * c_b * dt;
+        extent = min(extent, c_a);
+        extent = min(extent, c_b);
+        extent = max(extent, 0.0);  // safety: no negative extent
+
+        if (extent < 1e-12) {
+            continue;
+        }
+
+        // Consume reactants (1:1 stoichiometry)
+        conc[idx_a * cell_count + cell_index] -= extent;
+        conc[idx_b * cell_count + cell_index] -= extent;
+
+        // Temperature change from enthalpy (simplified):
+        // dT = -dH * extent / Cp  where Cp ≈ 4184 J/(kg·K) for water
+        // Using a simplified specific heat for the cell volume
+        float cp = 4184.0;  // J/(kg·K)
+        float dT = -dH * extent / cp;
+        temperatures[cell_index] += dT;
+    }
+}

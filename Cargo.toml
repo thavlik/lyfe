@@ -22,11 +22,18 @@ log = "0.4"
 env_logger = "0.11"
 parking_lot = "0.12"
 ahash = "0.8"
+bitflags = "2.6"
 
 # GUI
 egui = "0.30"
 egui-winit = "0.30"
 egui-ash-renderer = "0.7"
 
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
 # Shader compilation
 shaderc = "0.8"
+
+# Internal crates
+kinetics = { path = "kinetics" }

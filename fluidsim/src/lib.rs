@@ -18,6 +18,10 @@
 //! - **Inspection**: Mouse inspection aggregates over coarse cells (default 8x8)
 //!   using GPU readback of small regions.
 //!
+//! - **Kinetics Integration**: Once per second of simulated time, a semantic
+//!   snapshot is sent to the `kinetics` crate for semantic evaluation. The
+//!   returned update provides coefficients/directives for simulation.
+//!
 //! ## Data Layout
 //!
 //! Concentration storage uses `[species][cell]` layout where:
@@ -36,12 +40,16 @@ pub mod gpu;
 pub mod inspect;
 pub mod chemistry;
 pub mod coarse;
+pub mod semantic;
+pub mod kinetics_integration;
 
 pub use species::{SpeciesId, SpeciesRegistry};
 pub use grid::{Grid, CellCoord};
 pub use solid::{MaterialId, SolidCellMeta, SolidGeometry};
-pub use scenario::{Scenario, ScenarioBuilder};
+pub use scenario::{Scenario, ScenarioBuilder, create_acid_base_scenario};
 pub use sim::{Simulation, SimulationConfig, RenderState};
 pub use inspect::{InspectionResult, CoarseCellCoord};
 pub use chemistry::{ChemicalEvolutionRule, NoOpEvolution};
 pub use coarse::{CoarseGrid, CoarseCellData};
+pub use semantic::{SemanticConfig, SemanticSnapshotBuilder};
+pub use kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};

@@ -12,6 +12,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use fluidsim::{Simulation, SimulationConfig};
 use renderer::{RenderContext, RenderPipeline, EguiRenderer};
 use winit::{
@@ -25,6 +26,33 @@ use winit::{
 
 const _TARGET_FPS: f64 = 60.0;
 const _FRAME_TIME: Duration = Duration::from_nanos((1_000_000_000.0 / _TARGET_FPS) as u64);
+
+/// Which scenario to run.
+#[derive(Debug, Clone, Copy, Default)]
+enum ScenarioKind {
+    #[default]
+    Basic,
+    AcidBase,
+}
+
+#[derive(Parser)]
+#[command(name = "lyfe-demo", about = "Fluid simulation demo")]
+struct Cli {
+    /// Run in smoke-test mode (render 5 frames then exit)
+    #[arg(long)]
+    smoke_test: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// The original Na⁺/K⁺/Cl⁻ diffusion demo (default)
+    Basic,
+    /// Acid-base neutralization: H⁺ + OH⁻ → H₂O
+    AcidBase,
+}
 
 /// Demo application state.
 struct DemoApp {
@@ -53,10 +81,11 @@ struct DemoApp {
     // Flags
     needs_resize: bool,
     smoke_test: bool,
+    scenario: ScenarioKind,
 }
 
 impl DemoApp {
-    fn new(smoke_test: bool) -> Self {
+    fn new(smoke_test: bool, scenario: ScenarioKind) -> Self {
         Self {
             window: None,
             render_ctx: None,
@@ -75,6 +104,7 @@ impl DemoApp {
             current_fps: 0.0,
             needs_resize: false,
             smoke_test,
+            scenario,
         }
     }
 
@@ -92,7 +122,10 @@ impl DemoApp {
             inspection_mip: self.inspection_mip,
         };
         
-        let simulation = Simulation::new_demo(config)?;
+        let simulation = match self.scenario {
+            ScenarioKind::Basic => Simulation::new_demo(config)?,
+            ScenarioKind::AcidBase => Simulation::new_acid_base(config)?,
+        };
         log::info!("Simulation created successfully");
         
         log::info!("Creating render context...");
@@ -582,6 +615,7 @@ fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]>
         ("H+",  [1.0, 0.4, 0.7]),    // Pink
         ("OH-", [0.6, 0.2, 0.9]),    // Purple
         ("Ca2+",[0.9, 0.6, 0.1]),    // Orange
+        ("SO4(2-)", [0.3, 0.7, 0.9]),// Teal
     ]);
 
     registry.iter().map(|info| {
@@ -622,22 +656,28 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .init();
     
-    log::info!("Starting Fluid Simulation Demo");
+    let cli = Cli::parse();
+
+    let scenario = match cli.command {
+        Some(Commands::AcidBase) => ScenarioKind::AcidBase,
+        Some(Commands::Basic) | None => ScenarioKind::Basic,
+    };
+
+    log::info!("Starting Fluid Simulation Demo ({:?} scenario)", scenario);
     log::info!("Controls:");
     log::info!("  Mouse hover: Inspect cell");
     log::info!("  Space: Toggle pause");
     log::info!("  +/-: Adjust inspection mip");
     log::info!("  Escape: Exit");
     
-    let smoke_test = std::env::args().any(|a| a == "--smoke-test");
-    if smoke_test {
+    if cli.smoke_test {
         log::info!("Running in smoke-test mode (5 frames then exit)");
     }
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     
-    let mut app = DemoApp::new(smoke_test);
+    let mut app = DemoApp::new(cli.smoke_test, scenario);
     event_loop.run_app(&mut app)?;
     
     Ok(())
