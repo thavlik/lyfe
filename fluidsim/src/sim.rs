@@ -10,7 +10,7 @@ use crate::gpu::{GpuRenderBuffers, GpuSimulation, SharedGpuContext};
 use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
 use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
-use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario};
+use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario};
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
@@ -321,6 +321,17 @@ impl Simulation {
 
     pub fn new_acid_base_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
         let scenario = create_acid_base_scenario(config.width, config.height);
+        Self::from_scenario_with_shared_gpu_context(scenario, config, context)
+    }
+
+    /// Create the weak-acid buffer simulation.
+    pub fn new_buffers(config: SimulationConfig) -> Result<Self> {
+        let scenario = create_buffers_scenario(config.width, config.height);
+        Self::from_scenario(scenario, config)
+    }
+
+    pub fn new_buffers_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+        let scenario = create_buffers_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
 

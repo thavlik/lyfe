@@ -61,6 +61,7 @@ enum ScenarioKind {
     #[default]
     Basic,
     AcidBase,
+    Buffers,
 }
 
 #[derive(Parser)]
@@ -80,6 +81,8 @@ enum Commands {
     Basic,
     /// Acid-base neutralization: H⁺ + OH⁻ → H₂O
     AcidBase,
+    /// Weak-acid buffer vs NaOH using dissociated ionic species
+    Buffers,
 }
 
 /// Demo application state.
@@ -166,6 +169,7 @@ impl DemoApp {
         let simulation = match self.scenario {
             ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
             ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
+            ScenarioKind::Buffers => Simulation::new_buffers_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
         };
         log::info!("Simulation created successfully");
         
@@ -925,6 +929,7 @@ fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]>
         ("OH-", [0.6, 0.2, 0.9]),    // Purple
         ("Ca2+",[0.9, 0.6, 0.1]),    // Orange
         ("SO4(2-)", [0.3, 0.7, 0.9]),// Teal
+        ("CH3COO-", [0.9, 0.55, 0.15]), // Amber
     ]);
 
     registry.iter().map(|info| {
@@ -969,6 +974,7 @@ fn main() -> Result<()> {
 
     let scenario = match cli.command {
         Some(Commands::AcidBase) => ScenarioKind::AcidBase,
+        Some(Commands::Buffers) => ScenarioKind::Buffers,
         Some(Commands::Basic) | None => ScenarioKind::Basic,
     };
 

@@ -389,3 +389,95 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
 
     builder.build()
 }
+
+/// Create a weak-acid buffer scenario.
+///
+/// Top-left region: 0.35 M sodium acetate + 0.35 M acetic acid represented as
+/// dissociated species in the ionic soup:
+/// - Na+ = 0.35 M
+/// - H+ = 0.35 M
+/// - CH3COO- = 0.70 M
+///
+/// Bottom-right region: 0.2 M NaOH represented as:
+/// - Na+ = 0.2 M
+/// - OH- = 0.2 M
+pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
+    let wall_thickness = 4u32;
+    let inner_size = (width.min(height) / 2).max(64);
+    let outer_size = inner_size + 2 * wall_thickness;
+
+    let center_x = width / 2;
+    let center_y = height / 2;
+
+    let outer_x0 = center_x - outer_size / 2;
+    let outer_y0 = center_y - outer_size / 2;
+    let outer_x1 = outer_x0 + outer_size;
+    let outer_y1 = outer_y0 + outer_size;
+
+    let inner_x0 = outer_x0 + wall_thickness;
+    let inner_y0 = outer_y0 + wall_thickness;
+    let inner_x1 = outer_x1 - wall_thickness;
+    let inner_y1 = outer_y1 - wall_thickness;
+
+    let builder = ScenarioBuilder::new(width, height)
+        .register_species("H+")
+        .register_species("OH-")
+        .register_species("Na+")
+        .register_species("CH3COO-");
+
+    let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
+
+    let builder = builder.fill_hollow_rect(
+        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+    );
+
+    let mut builder = builder.fill_temperature(278.15);
+
+    let h_id = builder.species_registry.id_of("H+").unwrap();
+    let oh_id = builder.species_registry.id_of("OH-").unwrap();
+    let na_id = builder.species_registry.id_of("Na+").unwrap();
+    let acetate_id = builder.species_registry.id_of("CH3COO-").unwrap();
+
+    let inner_width = (inner_x1 - inner_x0) as f32;
+    let inner_height = (inner_y1 - inner_y0) as f32;
+
+    for y in inner_y0..inner_y1 {
+        for x in inner_x0..inner_x1 {
+            let index = builder.grid.index_of(CellCoord::new(x, y));
+            if builder.solid_geometry.is_solid(index) {
+                continue;
+            }
+
+            let nx = (x - inner_x0) as f32 / inner_width;
+            let ny = (y - inner_y0) as f32 / inner_height;
+
+            if nx + ny < 1.0 {
+                // Top-left: sodium acetate + acetic acid, represented as ions.
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(na_id, 0.35);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(h_id, 0.35);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(acetate_id, 0.70);
+            } else {
+                // Bottom-right: 0.2 M NaOH.
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(na_id, 0.2);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(oh_id, 0.2);
+            }
+        }
+    }
+
+    builder.build()
+}
