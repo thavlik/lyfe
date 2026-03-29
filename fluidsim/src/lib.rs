@@ -42,6 +42,7 @@ pub mod chemistry;
 pub mod coarse;
 pub mod semantic;
 pub mod kinetics_integration;
+pub mod leak;
 
 pub use species::{SpeciesId, SpeciesRegistry};
 pub use grid::{Grid, CellCoord};
@@ -54,3 +55,4 @@ pub use chemistry::{ChemicalEvolutionRule, NoOpEvolution};
 pub use coarse::{CoarseGrid, CoarseCellData};
 pub use semantic::{SemanticConfig, SemanticSnapshotBuilder};
 pub use kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
+pub use leak::LeakChannel;

@@ -27,6 +27,8 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 use crate::coarse::CoarseGrid;
+use crate::leak::LeakChannel;
+use crate::species::SpeciesRegistry;
 
 #[derive(Clone)]
 pub struct SharedGpuContext {
@@ -78,6 +80,18 @@ pub struct ReactionPushConstants {
     pub _pad: [u32; 3],
 }
 
+/// Push constants for the leak-channel compute shader.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct LeakPushConstants {
+    pub width: u32,
+    pub height: u32,
+    pub species_count: u32,
+    pub num_channels: u32,
+    pub dt: f32,
+    pub _pad: [u32; 3],
+}
+
 /// Push constants for the thermal diffusion compute shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -113,6 +127,19 @@ pub struct GpuReactionRule {
     pub entropy_delta_bits: u32, // f32 bit-cast
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuLeakChannel {
+    pub species_index: u32,
+    pub sink_x: i32,
+    pub sink_y: i32,
+    pub source_x: i32,
+    pub source_y: i32,
+    pub rate: f32,
+    pub rotation_byte: u32,
+    pub _pad: u32,
+}
+
 impl GpuReactionRule {
     pub const NONE: u32 = u32::MAX;
 
@@ -139,6 +166,7 @@ impl GpuReactionRule {
 
 /// Maximum number of reaction rules the GPU buffer can hold.
 const MAX_REACTION_RULES: usize = 16;
+const MAX_LEAK_CHANNELS: usize = 32;
 
 /// Optional reaction pipeline state.
 /// Created lazily when reaction rules are first uploaded.
@@ -165,6 +193,16 @@ pub struct ReactionPipelineState {
     pub active_rule_count: u32,
     /// Hash of the current rule set (for recompilation tracking)
     pub rule_set_hash: u64,
+}
+
+pub struct LeakPipelineState {
+    pub leak_descriptor_set_layout: vk::DescriptorSetLayout,
+    pub leak_pipeline_layout: vk::PipelineLayout,
+    pub leak_pipeline: vk::Pipeline,
+    pub leak_descriptor_pool: vk::DescriptorPool,
+    pub leak_descriptor_sets: Vec<vk::DescriptorSet>,
+    pub channels_buffer: GpuBuffer,
+    pub active_channel_count: u32,
 }
 
 /// A GPU buffer with its allocation.
@@ -286,6 +324,7 @@ pub struct GpuSimulation {
 
     // Reaction pipeline (created lazily when rules are first uploaded)
     pub reaction: Option<ReactionPipelineState>,
+    pub leak: Option<LeakPipelineState>,
 }
 
 impl GpuSimulation {
@@ -853,6 +892,7 @@ impl GpuSimulation {
             fence,
             coarse_grid,
             reaction: None,
+            leak: None,
         })
     }
 
@@ -1182,6 +1222,39 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
+    fn update_leak_descriptor_set(
+        device: &ash::Device,
+        set: vk::DescriptorSet,
+        conc_buffer: vk::Buffer,
+        channels_buffer: vk::Buffer,
+        conc_size: u64,
+        channels_size: u64,
+    ) {
+        let conc_info = [vk::DescriptorBufferInfo::default()
+            .buffer(conc_buffer)
+            .offset(0)
+            .range(conc_size)];
+        let channel_info = [vk::DescriptorBufferInfo::default()
+            .buffer(channels_buffer)
+            .offset(0)
+            .range(channels_size)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&conc_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&channel_info),
+        ];
+
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+    }
+
     fn current_concentration_buffer_handle(&self) -> vk::Buffer {
         if self.current_buffer == 0 {
             self.conc_buffer_a.buffer
@@ -1246,6 +1319,37 @@ impl GpuSimulation {
             let workgroup_size = 256u32;
             let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
             self.device.cmd_dispatch(cmd, num_groups, self.species_count as u32, 1);
+        }
+    }
+
+    fn record_leak_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        leak: &LeakPipelineState,
+        descriptor_set: vk::DescriptorSet,
+        push_constants: &LeakPushConstants,
+    ) {
+        unsafe {
+            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, leak.leak_pipeline);
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                leak.leak_pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                leak.leak_pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(push_constants),
+            );
+
+            let workgroup_size = 64u32;
+            let num_groups = (push_constants.num_channels + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(cmd, num_groups.max(1), 1, 1);
         }
     }
 
@@ -1491,6 +1595,22 @@ impl GpuSimulation {
                     cmd,
                     Self::temperature_buffer_handle(rxn, temperature_current_buffer),
                 );
+            }
+        }
+
+        if let Some(leak) = self.leak.as_ref() {
+            if leak.active_channel_count > 0 {
+                let leak_push = LeakPushConstants {
+                    width: self.width,
+                    height: self.height,
+                    species_count: self.species_count as u32,
+                    num_channels: leak.active_channel_count,
+                    dt: reaction_dt,
+                    _pad: [0; 3],
+                };
+                let leak_descriptor_set = leak.leak_descriptor_sets[self.current_buffer];
+                self.record_leak_dispatch(cmd, leak, leak_descriptor_set, &leak_push);
+                self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
             }
         }
 
@@ -2141,7 +2261,6 @@ impl GpuSimulation {
                 );
             }
         }
-
         let thermal_pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
@@ -2348,6 +2467,176 @@ impl GpuSimulation {
         Ok(())
     }
 
+    pub fn init_leak_pipeline(
+        &mut self,
+        channels: &[LeakChannel],
+        species_registry: &SpeciesRegistry,
+        solid_mask: &[u32],
+    ) -> Result<()> {
+        if channels.is_empty() {
+            return Ok(());
+        }
+        if channels.len() > MAX_LEAK_CHANNELS {
+            bail!("Too many leak channels: {} > {}", channels.len(), MAX_LEAK_CHANNELS);
+        }
+        if self.leak.is_some() {
+            return Ok(());
+        }
+
+        let packed_channels: Vec<GpuLeakChannel> = channels.iter().filter_map(|channel| {
+            let species_index = species_registry.index_of(channel.species)? as u32;
+            let ((sink_x, sink_y), (source_x, source_y)) =
+                channel.resolve_endpoints(self.width, self.height, solid_mask)?;
+            Some(GpuLeakChannel {
+                species_index,
+                sink_x,
+                sink_y,
+                source_x,
+                source_y,
+                rate: channel.rate,
+                rotation_byte: channel.rotation as u8 as u32,
+                _pad: 0,
+            })
+        }).collect();
+
+        let channels_buffer_size = (MAX_LEAK_CHANNELS * std::mem::size_of::<GpuLeakChannel>()) as u64;
+        let conc_buffer_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
+
+        let mut alloc = self.allocator.as_ref().unwrap().lock();
+        let channels_buffer = GpuBuffer::new(
+            &self.device,
+            &mut alloc,
+            channels_buffer_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuOnly,
+            "leak_channels",
+        )?;
+        drop(alloc);
+
+        self.staging_buffer.write(&packed_channels)?;
+        Self::copy_buffer_sync(
+            &self.device,
+            self.command_pool,
+            self.compute_queue,
+            self.fence,
+            self.staging_buffer.buffer,
+            channels_buffer.buffer,
+            (packed_channels.len() * std::mem::size_of::<GpuLeakChannel>()) as u64,
+            Some(self.command_buffer),
+        )?;
+
+        let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
+        let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
+        options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+        options.set_optimization_level(shaderc::OptimizationLevel::Performance);
+
+        let leak_spirv = compiler.compile_into_spirv(
+            include_str!("../shaders/leak.comp"),
+            shaderc::ShaderKind::Compute,
+            "leak.comp",
+            "main",
+            Some(&options),
+        ).context("Failed to compile leak shader")?;
+
+        let leak_shader_module_info = vk::ShaderModuleCreateInfo::default()
+            .code(leak_spirv.as_binary());
+        let leak_shader_module = unsafe {
+            self.device.create_shader_module(&leak_shader_module_info, None)?
+        };
+
+        let leak_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let leak_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&leak_bindings);
+        let leak_descriptor_set_layout = unsafe {
+            self.device.create_descriptor_set_layout(&leak_layout_info, None)?
+        };
+
+        let push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(std::mem::size_of::<LeakPushConstants>() as u32);
+        let leak_pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&leak_descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+        let leak_pipeline_layout = unsafe {
+            self.device.create_pipeline_layout(&leak_pipeline_layout_info, None)?
+        };
+
+        let entry_name = c"main";
+        let stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(leak_shader_module)
+            .name(entry_name);
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage_info)
+            .layout(leak_pipeline_layout);
+        let leak_pipeline = unsafe {
+            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|e| anyhow::anyhow!("Failed to create leak pipeline: {:?}", e.1))?[0]
+        };
+
+        unsafe {
+            self.device.destroy_shader_module(leak_shader_module, None);
+        }
+
+        let pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(4)];
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(2)
+            .pool_sizes(&pool_sizes);
+        let leak_descriptor_pool = unsafe {
+            self.device.create_descriptor_pool(&pool_info, None)?
+        };
+
+        let layouts = [leak_descriptor_set_layout, leak_descriptor_set_layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(leak_descriptor_pool)
+            .set_layouts(&layouts);
+        let leak_descriptor_sets = unsafe {
+            self.device.allocate_descriptor_sets(&alloc_info)?
+        };
+
+        Self::update_leak_descriptor_set(
+            &self.device,
+            leak_descriptor_sets[0],
+            self.conc_buffer_a.buffer,
+            channels_buffer.buffer,
+            conc_buffer_size,
+            channels_buffer_size,
+        );
+        Self::update_leak_descriptor_set(
+            &self.device,
+            leak_descriptor_sets[1],
+            self.conc_buffer_b.buffer,
+            channels_buffer.buffer,
+            conc_buffer_size,
+            channels_buffer_size,
+        );
+
+        self.leak = Some(LeakPipelineState {
+            leak_descriptor_set_layout,
+            leak_pipeline_layout,
+            leak_pipeline,
+            leak_descriptor_pool,
+            leak_descriptor_sets,
+            channels_buffer,
+            active_channel_count: packed_channels.len() as u32,
+        });
+
+        Ok(())
+    }
+
     /// Run one thermal diffusion step on the current temperature buffer.
     pub fn step_temperature(&mut self, dt: f32, thermal_diffusivity: f32) -> Result<()> {
         let rxn = match &mut self.reaction {
@@ -2450,6 +2739,19 @@ impl Drop for GpuSimulation {
                 drop(alloc);
             }
             log::info!("GpuSimulation::drop - reaction pipeline dropped");
+
+            if let Some(mut leak) = self.leak.take() {
+                self.device.destroy_descriptor_pool(leak.leak_descriptor_pool, None);
+                self.device.destroy_pipeline(leak.leak_pipeline, None);
+                self.device.destroy_pipeline_layout(leak.leak_pipeline_layout, None);
+                self.device.destroy_descriptor_set_layout(leak.leak_descriptor_set_layout, None);
+
+                let mut alloc = self.allocator.as_ref().unwrap().lock();
+                self.device.destroy_buffer(leak.channels_buffer.buffer, None);
+                alloc.free(std::mem::take(&mut leak.channels_buffer.allocation)).ok();
+                drop(alloc);
+            }
+            log::info!("GpuSimulation::drop - leak pipeline dropped");
 
             self.device.destroy_descriptor_pool(self.charge_descriptor_pool, None);
             self.device.destroy_pipeline(self.charge_projection_pipeline, None);

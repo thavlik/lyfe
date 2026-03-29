@@ -1,0 +1,60 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint species_count;
+    uint num_channels;
+    float dt;
+    uint _pad[3];
+};
+
+struct LeakChannel {
+    uint species_index;
+    int sink_x;
+    int sink_y;
+    int source_x;
+    int source_y;
+    float rate;
+    uint rotation_byte;
+    uint _pad;
+};
+
+layout(set = 0, binding = 0) buffer Concentrations {
+    float conc[];
+};
+
+layout(set = 0, binding = 1) readonly buffer LeakChannels {
+    LeakChannel channels[];
+};
+
+void main() {
+    uint channel_index = gl_GlobalInvocationID.x;
+    if (channel_index >= num_channels) {
+        return;
+    }
+
+    LeakChannel channel = channels[channel_index];
+    if (channel.sink_x < 0 || channel.sink_y < 0 || channel.source_x < 0 || channel.source_y < 0) {
+        return;
+    }
+    if (channel.sink_x >= int(width) || channel.sink_y >= int(height) ||
+        channel.source_x >= int(width) || channel.source_y >= int(height)) {
+        return;
+    }
+
+    uint sink_index = uint(channel.sink_y) * width + uint(channel.sink_x);
+    uint source_index = uint(channel.source_y) * width + uint(channel.source_x);
+    uint species_offset = channel.species_index * width * height;
+
+    float sink_concentration = conc[species_offset + sink_index];
+    float extent = min(channel.rate * sink_concentration * dt, sink_concentration);
+    if (extent <= 1e-12) {
+        return;
+    }
+
+    conc[species_offset + sink_index] -= extent;
+    conc[species_offset + source_index] += extent;
+}

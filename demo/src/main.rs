@@ -55,6 +55,15 @@ struct PerformanceSummary {
     worst_frame_ms_30s: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LeakChannelOverlay {
+    center: egui::Pos2,
+    sink: egui::Pos2,
+    source: egui::Pos2,
+    color: egui::Color32,
+    hovered: bool,
+}
+
 /// Which scenario to run.
 #[derive(Debug, Clone, Copy, Default)]
 enum ScenarioKind {
@@ -62,6 +71,7 @@ enum ScenarioKind {
     Basic,
     AcidBase,
     Buffers,
+    Leak,
 }
 
 #[derive(Parser)]
@@ -83,6 +93,8 @@ enum Commands {
     AcidBase,
     /// Weak-acid buffer vs NaOH with acetic-acid equilibrium
     Buffers,
+    /// Buffer scenario with membrane leak channels for K+ and Na+
+    Leak,
 }
 
 /// Demo application state.
@@ -100,6 +112,7 @@ struct DemoApp {
     tooltip_text: String,
     species_names: Vec<String>,  // Cached species names for tooltip display
     last_tooltip_coord: Option<(u32, u32)>,
+    hovered_leak_channel: Option<usize>,
     
     // Thermal view (momentary display while T is held)
     thermal_view: bool,
@@ -132,6 +145,7 @@ impl DemoApp {
             tooltip_text: String::new(),
             species_names: Vec::new(),
             last_tooltip_coord: None,
+            hovered_leak_channel: None,
             thermal_view: false,
             performance_overlay: false,
             last_frame: Instant::now(),
@@ -170,6 +184,7 @@ impl DemoApp {
             ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
             ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
             ScenarioKind::Buffers => Simulation::new_buffers_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
+            ScenarioKind::Leak => Simulation::new_leak_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
         };
         log::info!("Simulation created successfully");
         
@@ -223,6 +238,16 @@ impl DemoApp {
             let logical_h = size.height as f32 / scale;
             let grid_x = self.mouse_pos.0 * grid_w as f32 / logical_w;
             let grid_y = self.mouse_pos.1 * grid_h as f32 / logical_h;
+
+            if let Some(channel_index) = sim.hovered_leak_channel(grid_x, grid_y) {
+                self.hovered_leak_channel = Some(channel_index);
+                self.tooltip_text = sim.leak_channel_tooltip(channel_index)
+                    .unwrap_or_else(|| "Leak Channel".to_string());
+                self.show_tooltip = true;
+                return;
+            }
+            self.hovered_leak_channel = None;
+
             let coarse_coord = match (sim.coarse_dimensions(), sim.coarse_mip_factor()) {
                 (Some((coarse_w, coarse_h)), Some(mip)) => {
                     let coarse_x = ((grid_x.max(0.0) as u32) / mip).min(coarse_w.saturating_sub(1));
@@ -349,6 +374,108 @@ impl DemoApp {
             0.0,
             egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 242, 120)),
         );
+    }
+
+    fn grid_to_screen(&self, grid_x: f32, grid_y: f32) -> Option<egui::Pos2> {
+        let sim = self.simulation.as_ref()?;
+        let window = self.window.as_ref()?;
+        let (grid_w, grid_h) = sim.dimensions();
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let logical_w = size.width as f32 / scale;
+        let logical_h = size.height as f32 / scale;
+
+        Some(egui::pos2(
+            grid_x * logical_w / grid_w as f32,
+            grid_y * logical_h / grid_h as f32,
+        ))
+    }
+
+    fn leak_channel_overlays(&self) -> Vec<LeakChannelOverlay> {
+        let Some(sim) = self.simulation.as_ref() else { return Vec::new(); };
+        let mut overlays = Vec::new();
+
+        for (index, channel) in sim.leak_channels().iter().enumerate() {
+            let Some(center) = self.grid_to_screen(channel.x as f32 + 0.5, channel.y as f32 + 0.5) else {
+                continue;
+            };
+            let Some(((sink_x, sink_y), (source_x, source_y))) = sim.leak_channel_endpoints(index) else {
+                continue;
+            };
+            let Some(sink) = self.grid_to_screen(sink_x as f32 + 0.5, sink_y as f32 + 0.5) else {
+                continue;
+            };
+            let Some(source) = self.grid_to_screen(source_x as f32 + 0.5, source_y as f32 + 0.5) else {
+                continue;
+            };
+
+            let species_name = sim.species_registry()
+                .get(channel.species)
+                .map(|info| info.name.as_ref())
+                .unwrap_or("?");
+            let color = match species_name {
+                "Na+" => egui::Color32::from_rgb(242, 102, 74),
+                "K+" => egui::Color32::from_rgb(92, 214, 110),
+                _ => egui::Color32::from_rgb(230, 230, 230),
+            };
+            overlays.push(LeakChannelOverlay {
+                center,
+                sink,
+                source,
+                color,
+                hovered: self.hovered_leak_channel == Some(index),
+            });
+        }
+
+        overlays
+    }
+
+    fn draw_leak_channels(ctx: &egui::Context, overlays: &[LeakChannelOverlay]) {
+        if overlays.is_empty() {
+            return;
+        }
+
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("leak_channels"),
+        ));
+
+        for overlay in overlays {
+            let outline = if overlay.hovered {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(18, 22, 28)
+            };
+
+            painter.line_segment(
+                [overlay.sink, overlay.source],
+                egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(14, 18, 24, 210)),
+            );
+            painter.circle_filled(overlay.center, 8.5, egui::Color32::from_rgba_unmultiplied(236, 240, 245, 210));
+            painter.circle_stroke(
+                overlay.center,
+                8.5,
+                egui::Stroke::new(if overlay.hovered { 3.0 } else { 2.0 }, outline),
+            );
+            painter.circle_filled(overlay.center, 4.2, overlay.color);
+
+            let tangent = egui::vec2(overlay.source.x - overlay.sink.x, overlay.source.y - overlay.sink.y).normalized();
+            let normal = egui::vec2(-tangent.y, tangent.x);
+            let left_top = overlay.center - tangent * 10.0 + normal * 5.0;
+            let left_bottom = overlay.center - tangent * 10.0 - normal * 5.0;
+            let right_top = overlay.center + tangent * 10.0 + normal * 5.0;
+            let right_bottom = overlay.center + tangent * 10.0 - normal * 5.0;
+            painter.line_segment([left_top, left_bottom], egui::Stroke::new(2.0, outline));
+            painter.line_segment([right_top, right_bottom], egui::Stroke::new(2.0, outline));
+
+            let arrow_base = overlay.center + tangent * 8.0;
+            let arrow_tip = overlay.source;
+            let arrow_left = arrow_base - tangent * 5.5 + normal * 3.5;
+            let arrow_right = arrow_base - tangent * 5.5 - normal * 3.5;
+            painter.line_segment([arrow_base, arrow_tip], egui::Stroke::new(2.0, overlay.color));
+            painter.line_segment([arrow_tip, arrow_left], egui::Stroke::new(2.0, overlay.color));
+            painter.line_segment([arrow_tip, arrow_right], egui::Stroke::new(2.0, overlay.color));
+        }
     }
 
     fn push_performance_sample(&mut self, sample: PerformanceSample) {
@@ -783,6 +910,7 @@ impl ApplicationHandler for DemoApp {
                 let performance_summary = self.performance_summary();
                 let performance_samples: Vec<_> = self.performance_samples.iter().copied().collect();
                 let hovered_coarse_rect = self.hovered_coarse_rect();
+                let leak_channel_overlays = self.leak_channel_overlays();
                 
                 // Render egui overlay (not actually rendered to screen)
                 if let (Some(egui), Some(window)) = (&mut self.egui_renderer, &self.window) {
@@ -791,6 +919,7 @@ impl ApplicationHandler for DemoApp {
                     if let Some(rect) = hovered_coarse_rect {
                         Self::draw_hovered_coarse_outline(egui.context(), rect);
                     }
+                    Self::draw_leak_channels(egui.context(), &leak_channel_overlays);
                     
                     // Show tooltip near mouse
                     if self.show_tooltip {
@@ -976,6 +1105,7 @@ fn main() -> Result<()> {
     let scenario = match cli.command {
         Some(Commands::AcidBase) => ScenarioKind::AcidBase,
         Some(Commands::Buffers) => ScenarioKind::Buffers,
+        Some(Commands::Leak) => ScenarioKind::Leak,
         Some(Commands::Basic) | None => ScenarioKind::Basic,
     };
 

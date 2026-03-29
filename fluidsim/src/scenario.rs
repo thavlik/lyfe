@@ -4,6 +4,7 @@
 //! including species registration, solid geometry, and initial concentrations.
 
 use crate::grid::{Grid, CellCoord};
+use crate::leak::LeakChannel;
 use crate::solid::{MaterialId, MaterialRegistry, SolidGeometry};
 use crate::species::{SpeciesRegistry, SpeciesConcentrations};
 use ahash::AHashMap;
@@ -18,6 +19,7 @@ pub struct Scenario {
     pub species_registry: SpeciesRegistry,
     pub material_registry: MaterialRegistry,
     pub solid_geometry: SolidGeometry,
+    pub leak_channels: Vec<LeakChannel>,
     /// Initial concentrations per cell. Sparse - only non-zero cells stored.
     pub initial_concentrations: AHashMap<usize, SpeciesConcentrations>,
     /// Initial temperature per cell in Kelvin. Dense array, one f32 per cell.
@@ -71,6 +73,7 @@ pub struct ScenarioBuilder {
     species_registry: SpeciesRegistry,
     material_registry: MaterialRegistry,
     solid_geometry: SolidGeometry,
+    leak_channels: Vec<LeakChannel>,
     initial_concentrations: AHashMap<usize, SpeciesConcentrations>,
     initial_temperatures: Vec<f32>,
 }
@@ -84,6 +87,7 @@ impl ScenarioBuilder {
             species_registry: SpeciesRegistry::new(),
             material_registry: MaterialRegistry::new(),
             solid_geometry: SolidGeometry::new(grid.cell_count()),
+            leak_channels: Vec::new(),
             initial_concentrations: AHashMap::new(),
             initial_temperatures: Vec::new(),
         }
@@ -204,6 +208,7 @@ impl ScenarioBuilder {
             species_registry: self.species_registry,
             material_registry: self.material_registry,
             solid_geometry: self.solid_geometry,
+            leak_channels: self.leak_channels,
             initial_concentrations: self.initial_concentrations,
             initial_temperatures: temperatures,
         }
@@ -484,6 +489,137 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
                 builder.initial_temperatures[index] = 288.15;
             }
         }
+    }
+
+    builder.build()
+}
+
+/// Create a leak-channel membrane scenario.
+pub fn create_leak_scenario(width: u32, height: u32) -> Scenario {
+    let wall_thickness = 4u32;
+    let inner_size = (width.min(height) / 2).max(64);
+    let outer_size = inner_size + 2 * wall_thickness;
+
+    let center_x = width / 2;
+    let center_y = height / 2;
+
+    let outer_x0 = center_x - outer_size / 2;
+    let outer_y0 = center_y - outer_size / 2;
+    let outer_x1 = outer_x0 + outer_size;
+    let outer_y1 = outer_y0 + outer_size;
+
+    let inner_x0 = outer_x0 + wall_thickness;
+    let inner_y0 = outer_y0 + wall_thickness;
+    let inner_x1 = outer_x1 - wall_thickness;
+    let inner_y1 = outer_y1 - wall_thickness;
+
+    let builder = ScenarioBuilder::new(width, height)
+        .register_species("H+")
+        .register_species("OH-")
+        .register_species("Na+")
+        .register_species("K+")
+        .register_species("Cl-")
+        .register_species("CH3COOH")
+        .register_species("CH3COO-");
+
+    let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
+
+    let builder = builder.fill_hollow_rect(
+        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+    );
+
+    let mut builder = builder.fill_temperature(278.15);
+
+    let h_id = builder.species_registry.id_of("H+").unwrap();
+    let oh_id = builder.species_registry.id_of("OH-").unwrap();
+    let na_id = builder.species_registry.id_of("Na+").unwrap();
+    let k_id = builder.species_registry.id_of("K+").unwrap();
+    let cl_id = builder.species_registry.id_of("Cl-").unwrap();
+    let acetic_acid_id = builder.species_registry.id_of("CH3COOH").unwrap();
+    let acetate_id = builder.species_registry.id_of("CH3COO-").unwrap();
+
+    for y in 0..height {
+        for x in 0..width {
+            let index = builder.grid.index_of(CellCoord::new(x, y));
+            if builder.solid_geometry.is_solid(index) {
+                continue;
+            }
+
+            let inside_box = x >= inner_x0 && x < inner_x1 && y >= inner_y0 && y < inner_y1;
+            if !inside_box {
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(k_id, 1.0);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(cl_id, 1.0);
+            }
+        }
+    }
+
+    let inner_width = (inner_x1 - inner_x0) as f32;
+    let inner_height = (inner_y1 - inner_y0) as f32;
+
+    for y in inner_y0..inner_y1 {
+        for x in inner_x0..inner_x1 {
+            let index = builder.grid.index_of(CellCoord::new(x, y));
+            if builder.solid_geometry.is_solid(index) {
+                continue;
+            }
+
+            let nx = (x - inner_x0) as f32 / inner_width;
+            let ny = (y - inner_y0) as f32 / inner_height;
+
+            if nx + ny < 1.0 {
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(na_id, 0.35);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(h_id, 1.8e-5);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(acetate_id, 0.35);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(acetic_acid_id, 0.35);
+            } else {
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(na_id, 0.2);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(oh_id, 0.2);
+                builder.initial_temperatures[index] = 288.15;
+            }
+        }
+    }
+
+    let channel_count = 6u32;
+    for i in 0..channel_count {
+        let y = inner_y0 + ((i + 1) * (inner_y1 - inner_y0) / (channel_count + 1));
+        builder.leak_channels.push(LeakChannel::new(
+            1.0,
+            k_id,
+            (inner_x0 - 1) as i32,
+            y as i32,
+            0,
+        ));
+        builder.leak_channels.push(LeakChannel::new(
+            1.0,
+            na_id,
+            inner_x1 as i32,
+            y as i32,
+            0,
+        ));
     }
 
     builder.build()

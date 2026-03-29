@@ -10,7 +10,8 @@ use crate::gpu::{GpuRenderBuffers, GpuSimulation, SharedGpuContext};
 use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
 use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
-use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario};
+use crate::leak::LeakChannel;
+use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario, create_leak_scenario};
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
@@ -111,6 +112,8 @@ pub struct Simulation {
     inspector: Inspector,
     /// Chemical evolution rule
     evolution_rule: Box<dyn ChemicalEvolutionRule>,
+    /// Leak channels embedded in the current scenario.
+    leak_channels: Vec<LeakChannel>,
     /// Configuration
     config: SimulationConfig,
     /// Cached concentration data for inspection
@@ -196,6 +199,9 @@ impl Simulation {
         };
 
         gpu.init_reaction_pipeline(&temperatures)?;
+        if !scenario.leak_channels.is_empty() {
+            gpu.init_leak_pipeline(&scenario.leak_channels, &scenario.species_registry, &solid_mask)?;
+        }
         let runtime_readbacks_enabled = !gpu.uses_shared_vulkan_context();
         let inspection_readbacks_enabled = true;
         let reaction_rate_scale = config.reaction_rate_scale;
@@ -207,6 +213,7 @@ impl Simulation {
             gpu,
             inspector: Inspector::new(config.inspection_mip),
             evolution_rule: Box::new(NoOpEvolution),
+            leak_channels: scenario.leak_channels,
             config,
             cached_concentrations: Some(concentrations.clone()),
             cached_solid_mask: Some(solid_mask.clone()),
@@ -332,6 +339,17 @@ impl Simulation {
 
     pub fn new_buffers_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
         let scenario = create_buffers_scenario(config.width, config.height);
+        Self::from_scenario_with_shared_gpu_context(scenario, config, context)
+    }
+
+    /// Create the membrane leak-channel simulation.
+    pub fn new_leak(config: SimulationConfig) -> Result<Self> {
+        let scenario = create_leak_scenario(config.width, config.height);
+        Self::from_scenario(scenario, config)
+    }
+
+    pub fn new_leak_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+        let scenario = create_leak_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
 
@@ -589,6 +607,38 @@ impl Simulation {
     /// Get the material registry.
     pub fn material_registry(&self) -> &MaterialRegistry {
         &self.material_registry
+    }
+
+    pub fn leak_channels(&self) -> &[LeakChannel] {
+        &self.leak_channels
+    }
+
+    pub fn hovered_leak_channel(&self, grid_x: f32, grid_y: f32) -> Option<usize> {
+        self.leak_channels.iter().position(|channel| {
+            channel.contains_grid_point(grid_x, grid_y, 2.6, 1.3)
+        })
+    }
+
+    pub fn leak_channel_endpoints(&self, index: usize) -> Option<((i32, i32), (i32, i32))> {
+        let channel = self.leak_channels.get(index)?;
+        let solid_mask = self.cached_solid_mask.as_ref()?;
+        channel.resolve_endpoints(self.grid.width, self.grid.height, solid_mask)
+    }
+
+    pub fn leak_channel_tooltip(&self, index: usize) -> Option<String> {
+        let channel = self.leak_channels.get(index)?;
+        let species_name = self.species_registry.get(channel.species)?.name.as_ref();
+        let ((sink_x, sink_y), (source_x, source_y)) = self.leak_channel_endpoints(index)?;
+        Some(format!(
+            "Leak Channel\nSpecies: {}\nRate: {:.3}\nFlow: {}\nSink cell: ({}, {})\nSource cell: ({}, {})",
+            species_name,
+            channel.rate,
+            channel.flow_label(),
+            sink_x,
+            sink_y,
+            source_x,
+            source_y,
+        ))
     }
 
     /// Get the current simulation time.
