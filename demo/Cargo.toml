@@ -1,0 +1,20 @@
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+
+[dependencies]
+fluidsim = { path = "../fluidsim" }
+renderer = { path = "../renderer" }
+winit.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+glam.workspace = true
+raw-window-handle.workspace = true
+ash.workspace = true
+egui.workspace = true

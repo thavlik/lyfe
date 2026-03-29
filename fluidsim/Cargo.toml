@@ -3,4 +3,19 @@ name = "fluidsim"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "fluidsim"
+path = "src/lib.rs"
+
 [dependencies]
+ash.workspace = true
+gpu-allocator.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+ahash.workspace = true
+shaderc.workspace = true
+raw-window-handle.workspace = true

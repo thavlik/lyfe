@@ -1,5 +1,31 @@
 [workspace]
-members = ["fluidsim", "renderer"]
+members = ["fluidsim", "renderer", "demo"]
 resolver = "3"
 
 [workspace.dependencies]
+# GPU/Vulkan
+ash = "0.38"
+gpu-allocator = "0.27"
+
+# Windowing
+winit = "0.30"
+raw-window-handle = "0.6"
+
+# Math
+glam = "0.29"
+bytemuck = { version = "1.18", features = ["derive"] }
+
+# Utilities
+anyhow = "1.0"
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11"
+parking_lot = "0.12"
+ahash = "0.8"
+
+# GUI
+egui = "0.30"
+egui-winit = "0.30"
+
+# Shader compilation
+shaderc = "0.8"
