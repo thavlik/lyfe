@@ -100,23 +100,25 @@ pub struct ChargeProjectionPushConstants {
     pub _pad: [u32; 3],
 }
 
-/// A single GPU-packed reaction rule (4 × u32).
+/// A single GPU-packed reaction rule.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuReactionRule {
     pub reactant_a_index: u32,
     pub reactant_b_index: u32,
-    pub rate_constant_bits: u32, // f32 bit-cast
+    pub effective_rate_bits: u32, // f32 bit-cast
     pub enthalpy_delta_bits: u32, // f32 bit-cast
+    pub entropy_delta_bits: u32, // f32 bit-cast
 }
 
 impl GpuReactionRule {
-    pub fn new(a: u32, b: u32, rate: f32, enthalpy: f32) -> Self {
+    pub fn new(a: u32, b: u32, rate: f32, enthalpy: f32, entropy: f32) -> Self {
         Self {
             reactant_a_index: a,
             reactant_b_index: b,
-            rate_constant_bits: rate.to_bits(),
+            effective_rate_bits: rate.to_bits(),
             enthalpy_delta_bits: enthalpy.to_bits(),
+            entropy_delta_bits: entropy.to_bits(),
         }
     }
 }
@@ -210,6 +212,7 @@ impl GpuBuffer {
 
 /// GPU resources for the fluid simulation.
 pub struct GpuSimulation {
+    pub entry: Option<ash::Entry>,
     // Vulkan handles
     pub instance: ash::Instance,
     pub physical_device: vk::PhysicalDevice,
@@ -286,8 +289,9 @@ impl GpuSimulation {
         diffusion_coeffs_data: &[f32],
         species_charges_data: &[i32],
     ) -> Result<Self> {
-        let context = Self::create_owned_context()?;
+        let (entry, context) = Self::create_owned_context()?;
         Self::new_from_context(
+            Some(entry),
             context,
             true,
             width,
@@ -313,6 +317,7 @@ impl GpuSimulation {
         species_charges_data: &[i32],
     ) -> Result<Self> {
         Self::new_from_context(
+            None,
             context,
             false,
             width,
@@ -326,7 +331,7 @@ impl GpuSimulation {
         )
     }
 
-    fn create_owned_context() -> Result<SharedGpuContext> {
+    fn create_owned_context() -> Result<(ash::Entry, SharedGpuContext)> {
         let entry = unsafe { ash::Entry::load()? };
 
         let app_name = c"FluidSim";
@@ -363,8 +368,19 @@ impl GpuSimulation {
 
         let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         let compute_queue_family = queue_families.iter()
-            .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
-            .context("No compute queue family found")? as u32;
+            .enumerate()
+            .find_map(|(index, qf)| {
+                (qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                    && qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
+                    .then_some(index as u32)
+            })
+            .or_else(|| {
+                queue_families.iter().enumerate().find_map(|(index, qf)| {
+                    qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                        .then_some(index as u32)
+                })
+            })
+            .context("No compute-capable queue family found")?;
 
         let queue_priority = [1.0f32];
         let queue_info = vk::DeviceQueueCreateInfo::default()
@@ -386,17 +402,21 @@ impl GpuSimulation {
             allocation_sizes: Default::default(),
         })?;
 
-        Ok(SharedGpuContext {
-            instance,
-            physical_device,
-            device,
-            queue,
-            queue_family: compute_queue_family,
-            allocator: Arc::new(Mutex::new(allocator)),
-        })
+        Ok((
+            entry,
+            SharedGpuContext {
+                instance,
+                physical_device,
+                device,
+                queue,
+                queue_family: compute_queue_family,
+                allocator: Arc::new(Mutex::new(allocator)),
+            },
+        ))
     }
 
     fn new_from_context(
+        entry: Option<ash::Entry>,
         context: SharedGpuContext,
         owns_vulkan_context: bool,
         width: u32,
@@ -788,6 +808,7 @@ impl GpuSimulation {
         ).ok();
 
         Ok(Self {
+            entry,
             instance,
             physical_device,
             device,
@@ -837,6 +858,9 @@ impl GpuSimulation {
         reuse_cmd: Option<vk::CommandBuffer>,
     ) -> Result<()> {
         let (cmd, allocated) = if let Some(cmd) = reuse_cmd {
+            unsafe {
+                device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
+            }
             (cmd, false)
         } else {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -883,6 +907,9 @@ impl GpuSimulation {
         reuse_cmd: Option<vk::CommandBuffer>,
     ) -> Result<()> {
         let (cmd, allocated) = if let Some(cmd) = reuse_cmd {
+            unsafe {
+                device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
+            }
             (cmd, false)
         } else {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -2188,8 +2215,9 @@ impl GpuSimulation {
         for r in rules {
             r.reactant_a_index.hash(&mut hasher);
             r.reactant_b_index.hash(&mut hasher);
-            r.rate_constant_bits.hash(&mut hasher);
+            r.effective_rate_bits.hash(&mut hasher);
             r.enthalpy_delta_bits.hash(&mut hasher);
+            r.entropy_delta_bits.hash(&mut hasher);
         }
         let new_hash = hasher.finish();
 

@@ -4,7 +4,7 @@
 //
 // Applies reaction rules to concentrations.
 // Each rule has the form:  reactant_a + reactant_b → products
-// with a rate constant, enthalpy delta, and activation energy.
+// with an effective rate, enthalpy delta, and entropy delta.
 //
 // The shader consumes the limiting reactant at a rate determined by:
 //   extent = min(c_a, c_b) * effective_rate * dt
@@ -33,8 +33,9 @@ layout(push_constant) uniform PushConstants {
 struct ReactionRule {
     uint reactant_a_index;       // species dense index of first reactant
     uint reactant_b_index;       // species dense index of second reactant
-    float rate_constant;         // effective rate (pre-scaled for simulation)
+    float effective_rate;        // effective rate (pre-scaled for simulation)
     float enthalpy_delta;        // J/mol (negative = exothermic)
+    float entropy_delta;         // J/(mol*K)
 };
 
 // Binding 0: Concentration buffer (read-write, in-place)
@@ -54,7 +55,7 @@ layout(set = 0, binding = 2) buffer Temperatures {
 
 // Binding 3: Reaction rules buffer
 layout(set = 0, binding = 3) readonly buffer ReactionRules {
-    // Packed as: [reactant_a_index, reactant_b_index, rate_constant_bits, enthalpy_bits] per rule
+    // Packed as: [reactant_a_index, reactant_b_index, effective_rate_bits, enthalpy_bits, entropy_bits] per rule
     uint reaction_data[];
 };
 
@@ -73,15 +74,20 @@ void main() {
 
     // Apply each reaction rule
     for (uint r = 0; r < num_reactions; r++) {
-        uint base = r * 4;
+        uint base = r * 5;
         uint idx_a = reaction_data[base + 0];
         uint idx_b = reaction_data[base + 1];
         float k = uintBitsToFloat(reaction_data[base + 2]);
         float dH = uintBitsToFloat(reaction_data[base + 3]);
+        float dS = uintBitsToFloat(reaction_data[base + 4]);
 
         // Read current concentrations of reactants
         float c_a = conc[idx_a * cell_count + cell_index];
         float c_b = conc[idx_b * cell_count + cell_index];
+        float local_temperature = max(temperatures[cell_index], 1.0);
+
+        // Gibbs free energy: ΔG = ΔH - TΔS.
+        float dG = dH - local_temperature * dS;
 
         // Reaction extent: second-order kinetics limited by both reactants
         // extent = k * c_a * c_b * dt, clamped to not exceed either reactant
@@ -98,11 +104,10 @@ void main() {
         conc[idx_a * cell_count + cell_index] -= extent;
         conc[idx_b * cell_count + cell_index] -= extent;
 
-        // Temperature change from enthalpy (simplified):
-        // dT = -dH * extent / Cp  where Cp ≈ 4184 J/(kg·K) for water
-        // Using a simplified specific heat for the cell volume
+        // Thermal effect from Gibbs free energy release/uptake.
+        // Negative ΔG releases usable energy; positive ΔG cools the cell.
         float cp = 4184.0;  // J/(kg·K)
-        float dT = -dH * extent / cp;
+        float dT = -dG * extent / cp;
         temperatures[cell_index] += dT;
     }
 }

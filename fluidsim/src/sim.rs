@@ -759,3 +759,4 @@ impl Simulation {
         self.kinetics.as_ref().map(|k| k.stats())
     }
 }
+

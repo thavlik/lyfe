@@ -261,11 +261,9 @@ impl DemoApp {
                 self.tooltip_text = format!(
                     "Coarse Cell ({}, {})\n\
                      Fluid: {} / Solid: {}\n\
-                     Age: {:.0}ms\n\
                      Species:\n{}",
                     data.coord.0, data.coord.1,
                     data.fluid_count, data.solid_count,
-                    data.age.as_secs_f64() * 1000.0,
                     species_lines,
                 );
                 self.show_tooltip = true;
@@ -289,11 +287,9 @@ impl DemoApp {
                 self.tooltip_text = format!(
                     "Coarse Cell ({}, {})\n\
                      Fluid: {} / Solid: {}\n\
-                     Age: {:.0}ms (cached)\n\
                      Species:\n{}",
                     data.coord.0, data.coord.1,
                     data.fluid_count, data.solid_count,
-                    data.age.as_secs_f64() * 1000.0,
                     species_lines,
                 );
                 self.show_tooltip = true;

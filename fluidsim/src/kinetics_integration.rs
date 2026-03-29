@@ -436,12 +436,14 @@ impl SemanticUpdateApplicator {
         let rate = directive.effective_rate as f32;
 
         let enthalpy = directive.enthalpy_delta_j_per_mol.unwrap_or(0.0) as f32;
+        let entropy = directive.entropy_delta_j_per_mol_k.unwrap_or(0.0) as f32;
 
         Some(GpuReactionRule::new(
             a_idx as u32,
             b_idx as u32,
             rate,
             enthalpy,
+            entropy,
         ))
     }
 }
