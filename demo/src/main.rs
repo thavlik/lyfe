@@ -191,15 +191,19 @@ impl DemoApp {
             // Poll for any completed readbacks
             if let Some(data) = sim.poll_async_inspection() {
                 // New data available - format it
-                let species_lines: String = data.concentrations.iter()
+                let mut species_rows: Vec<_> = data.concentrations.iter()
                     .enumerate()
                     .filter(|&(_, c)| *c > 0.001)
                     .map(|(i, c)| {
                         let name = self.species_names.get(i)
                             .map(|s| s.as_str())
                             .unwrap_or("?");
-                        format!("  {:<6} {:>8.3} M", name, c)
+                        (name.to_string(), *c)
                     })
+                    .collect();
+                species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let species_lines: String = species_rows.iter()
+                    .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
                     .collect::<Vec<_>>()
                     .join("\n");
                 self.tooltip_text = format!(
@@ -215,15 +219,19 @@ impl DemoApp {
                 self.show_tooltip = true;
             } else if let Some(data) = sim.get_cached_inspection() {
                 // Use cached data (may be stale)
-                let species_lines: String = data.concentrations.iter()
+                let mut species_rows: Vec<_> = data.concentrations.iter()
                     .enumerate()
                     .filter(|&(_, c)| *c > 0.001)
                     .map(|(i, c)| {
                         let name = self.species_names.get(i)
                             .map(|s| s.as_str())
                             .unwrap_or("?");
-                        format!("  {:<6} {:>8.3} M", name, c)
+                        (name.to_string(), *c)
                     })
+                    .collect();
+                species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let species_lines: String = species_rows.iter()
+                    .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
                     .collect::<Vec<_>>()
                     .join("\n");
                 self.tooltip_text = format!(
