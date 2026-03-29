@@ -120,6 +120,9 @@ pub struct Simulation {
 }
 
 impl Simulation {
+    const MIN_KINETICS_INTERVAL_SECONDS: f64 = 1.0;
+    const MAX_KINETICS_INTERVAL_SECONDS: f64 = 30.0;
+
     /// Create a new simulation from a scenario.
     pub fn from_scenario(scenario: Scenario, config: SimulationConfig) -> Result<Self> {
         Self::from_scenario_with_gpu_context(scenario, config, None)
@@ -172,7 +175,7 @@ impl Simulation {
 
         gpu.init_reaction_pipeline(&temperatures)?;
 
-        Ok(Self {
+        let mut simulation = Self {
             grid: scenario.grid,
             species_registry: scenario.species_registry,
             material_registry: scenario.material_registry,
@@ -180,17 +183,95 @@ impl Simulation {
             inspector: Inspector::new(config.inspection_mip),
             evolution_rule: Box::new(NoOpEvolution),
             config,
-            cached_concentrations: None,
-            cached_solid_mask: None,
-            cached_material_ids: None,
-            cached_temperatures: Some(temperatures),
-            cache_dirty: true,
+            cached_concentrations: Some(concentrations.clone()),
+            cached_solid_mask: Some(solid_mask.clone()),
+            cached_material_ids: Some(material_ids.clone()),
+            cached_temperatures: Some(temperatures.clone()),
+            cache_dirty: false,
             time: 0.0,
             step_count: 0,
             paused: false,
             kinetics: KineticsIntegration::new().ok(),
             update_applicator: SemanticUpdateApplicator::new(),
-        })
+        };
+
+        simulation.bootstrap_kinetics(
+            &concentrations,
+            &solid_mask,
+            &material_ids,
+            &temperatures,
+        )?;
+
+        Ok(simulation)
+    }
+
+    fn bootstrap_kinetics(
+        &mut self,
+        concentrations: &[Vec<f32>],
+        solid_mask: &[u32],
+        material_ids: &[u32],
+        temperatures: &[f32],
+    ) -> Result<()> {
+        let Some(mut kinetics) = self.kinetics.take() else {
+            return Ok(());
+        };
+
+        kinetics.set_evaluation_interval(Self::MIN_KINETICS_INTERVAL_SECONDS);
+
+        let update_result = kinetics.evaluate(
+            self.grid.width,
+            self.grid.height,
+            self.time,
+            concentrations,
+            solid_mask,
+            material_ids,
+            temperatures,
+            &self.species_registry,
+            &self.material_registry,
+        );
+
+        match update_result {
+            Ok(update) => {
+                let (_applied, gpu_rules) = self.update_applicator.apply(
+                    update,
+                    &self.species_registry,
+                    &mut self.material_registry,
+                );
+
+                let mut rules_changed = false;
+                if !gpu_rules.is_empty() {
+                    match self.gpu.upload_reaction_rules(&gpu_rules) {
+                        Ok(changed) => {
+                            rules_changed = changed;
+                        }
+                        Err(error) => {
+                            log::error!("Failed to upload bootstrap reaction rules: {}", error);
+                            rules_changed = true;
+                        }
+                    }
+                }
+
+                Self::update_kinetics_interval(&mut kinetics, rules_changed)
+            }
+            Err(error) => {
+                log::warn!("Initial kinetics evaluation failed: {}", error);
+                kinetics.set_evaluation_interval(Self::MIN_KINETICS_INTERVAL_SECONDS);
+            }
+        }
+
+        self.kinetics = Some(kinetics);
+        Ok(())
+    }
+
+    fn update_kinetics_interval(kinetics: &mut KineticsIntegration, rules_changed: bool) {
+        if rules_changed {
+            kinetics.set_evaluation_interval(Self::MIN_KINETICS_INTERVAL_SECONDS);
+            return;
+        }
+
+        let next_interval = (kinetics.evaluation_interval() * 2.0)
+            .clamp(Self::MIN_KINETICS_INTERVAL_SECONDS, Self::MAX_KINETICS_INTERVAL_SECONDS);
+        kinetics.set_evaluation_interval(next_interval);
     }
 
     /// Create the demo simulation.
@@ -320,11 +401,20 @@ impl Simulation {
                         }
 
                         // Upload reaction rules to GPU (tracking avoids redundant uploads)
+                        let mut rules_changed = false;
                         if !gpu_rules.is_empty() {
-                            if let Err(e) = self.gpu.upload_reaction_rules(&gpu_rules) {
-                                log::error!("Failed to upload reaction rules: {}", e);
+                            match self.gpu.upload_reaction_rules(&gpu_rules) {
+                                Ok(changed) => {
+                                    rules_changed = changed;
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to upload reaction rules: {}", e);
+                                    rules_changed = true;
+                                }
                             }
                         }
+
+                        Self::update_kinetics_interval(kinetics, rules_changed);
                     }
                     Err(e) => {
                         log::warn!("Kinetics evaluation failed: {}", e);
