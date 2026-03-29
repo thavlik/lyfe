@@ -212,17 +212,14 @@ impl Simulation {
             self.config.diffusion_rate,
             self.config.thermal_diffusion_rate,
         );
-        for i in 0..substeps {
-            self.gpu.step(substep_dt, self.config.diffusion_rate)?;
-            self.gpu.step_charge_projection(self.config.charge_correction_strength)?;
-            self.gpu.step_temperature(substep_dt, self.config.thermal_diffusion_rate)?;
-            log::trace!("Completed substep {}", i);
-        }
-
-        // Run reaction pass with the full simulated dt
-        self.gpu.step_reactions(dt_sim)?;
-        self.gpu.step_charge_projection(self.config.charge_correction_strength)?;
-        self.gpu.step_temperature(substep_dt, self.config.thermal_diffusion_rate)?;
+        self.gpu.step_frame(
+            substeps,
+            substep_dt,
+            self.config.diffusion_rate,
+            self.config.charge_correction_strength,
+            dt_sim,
+            self.config.thermal_diffusion_rate,
+        )?;
 
         self.time += dt_sim as f64;
         self.step_count += 1;

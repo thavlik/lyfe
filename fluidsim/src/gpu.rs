@@ -1018,6 +1018,303 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
+    fn current_concentration_buffer_handle(&self) -> vk::Buffer {
+        if self.current_buffer == 0 {
+            self.conc_buffer_a.buffer
+        } else {
+            self.conc_buffer_b.buffer
+        }
+    }
+
+    fn temperature_buffer_handle(rxn: &ReactionPipelineState, current_buffer: usize) -> vk::Buffer {
+        if current_buffer == 0 {
+            rxn.temperature_buffer_a.buffer
+        } else {
+            rxn.temperature_buffer_b.buffer
+        }
+    }
+
+    fn record_compute_buffer_barrier(&self, cmd: vk::CommandBuffer, buffer: vk::Buffer) {
+        let barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+            .buffer(buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+        }
+    }
+
+    fn record_diffusion_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        descriptor_set: vk::DescriptorSet,
+        push_constants: &DiffusionPushConstants,
+    ) {
+        unsafe {
+            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.diffusion_pipeline);
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(push_constants),
+            );
+
+            let workgroup_size = 256u32;
+            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(cmd, num_groups, self.species_count as u32, 1);
+        }
+    }
+
+    fn record_charge_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        descriptor_set: vk::DescriptorSet,
+        push_constants: &ChargeProjectionPushConstants,
+    ) {
+        unsafe {
+            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.charge_projection_pipeline);
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.charge_pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.charge_pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(push_constants),
+            );
+
+            let workgroup_size = 256u32;
+            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(cmd, num_groups, 1, 1);
+        }
+    }
+
+    fn record_reaction_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        rxn: &ReactionPipelineState,
+        descriptor_set: vk::DescriptorSet,
+        push_constants: &ReactionPushConstants,
+    ) {
+        unsafe {
+            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, rxn.reaction_pipeline);
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                rxn.reaction_pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                rxn.reaction_pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(push_constants),
+            );
+
+            let workgroup_size = 256u32;
+            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(cmd, num_groups, 1, 1);
+        }
+    }
+
+    fn record_temperature_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        rxn: &ReactionPipelineState,
+        descriptor_set: vk::DescriptorSet,
+        push_constants: &ThermalPushConstants,
+    ) {
+        unsafe {
+            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, rxn.thermal_pipeline);
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                rxn.thermal_pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                rxn.thermal_pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(push_constants),
+            );
+
+            let workgroup_size = 256u32;
+            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(cmd, num_groups, 1, 1);
+        }
+    }
+
+    /// Execute a full simulation step as a single GPU submission.
+    pub fn step_frame(
+        &mut self,
+        substeps: u32,
+        substep_dt: f32,
+        diffusion_rate: f32,
+        charge_correction_strength: f32,
+        reaction_dt: f32,
+        thermal_diffusivity: f32,
+    ) -> Result<()> {
+        if substeps == 0 {
+            return Ok(());
+        }
+
+        let charge_push = ChargeProjectionPushConstants {
+            width: self.width,
+            height: self.height,
+            species_count: self.species_count as u32,
+            correction_strength: charge_correction_strength,
+            _pad: [0; 3],
+        };
+
+        let mut temperature_current_buffer = self.reaction.as_ref()
+            .map(|rxn| rxn.temperature_current_buffer)
+            .unwrap_or(0);
+
+        unsafe {
+            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+        }
+
+        for _ in 0..substeps {
+            let diffusion_push = DiffusionPushConstants {
+                width: self.width,
+                height: self.height,
+                species_count: self.species_count as u32,
+                species_index: 0xFFFFFFFF,
+                diffusion_rate,
+                dt: substep_dt,
+                _pad: [0, 0],
+            };
+
+            let diffusion_descriptor_set = self.descriptor_sets[self.current_buffer];
+            self.record_diffusion_dispatch(self.command_buffer, diffusion_descriptor_set, &diffusion_push);
+
+            let next_buffer = 1 - self.current_buffer;
+            let next_concentration_buffer = if next_buffer == 0 {
+                self.conc_buffer_a.buffer
+            } else {
+                self.conc_buffer_b.buffer
+            };
+            self.record_compute_buffer_barrier(self.command_buffer, next_concentration_buffer);
+
+            if let Some(ref coarse) = self.coarse_grid {
+                coarse.record_compute(self.command_buffer, next_buffer);
+            }
+
+            self.current_buffer = next_buffer;
+
+            let charge_descriptor_set = self.charge_descriptor_sets[self.current_buffer];
+            self.record_charge_dispatch(self.command_buffer, charge_descriptor_set, &charge_push);
+            self.record_compute_buffer_barrier(self.command_buffer, self.current_concentration_buffer_handle());
+
+            if let Some(rxn) = self.reaction.as_ref() {
+                let thermal_push = ThermalPushConstants {
+                    width: self.width,
+                    height: self.height,
+                    thermal_diffusivity,
+                    dt: substep_dt,
+                    _pad: [0; 2],
+                };
+                let thermal_descriptor_set = rxn.thermal_descriptor_sets[temperature_current_buffer];
+                self.record_temperature_dispatch(self.command_buffer, rxn, thermal_descriptor_set, &thermal_push);
+                temperature_current_buffer = 1 - temperature_current_buffer;
+                self.record_compute_buffer_barrier(
+                    self.command_buffer,
+                    Self::temperature_buffer_handle(rxn, temperature_current_buffer),
+                );
+            }
+        }
+
+        if let Some(rxn) = self.reaction.as_ref() {
+            let reaction_push = ReactionPushConstants {
+                width: self.width,
+                height: self.height,
+                species_count: self.species_count as u32,
+                num_reactions: rxn.active_rule_count,
+                dt: reaction_dt,
+                _pad: [0; 3],
+            };
+
+            let reaction_descriptor_set = rxn.reaction_descriptor_sets[
+                Self::reaction_descriptor_index(self.current_buffer, temperature_current_buffer)
+            ];
+            self.record_reaction_dispatch(self.command_buffer, rxn, reaction_descriptor_set, &reaction_push);
+            self.record_compute_buffer_barrier(self.command_buffer, self.current_concentration_buffer_handle());
+            self.record_compute_buffer_barrier(
+                self.command_buffer,
+                Self::temperature_buffer_handle(rxn, temperature_current_buffer),
+            );
+
+            let thermal_push = ThermalPushConstants {
+                width: self.width,
+                height: self.height,
+                thermal_diffusivity,
+                dt: substep_dt,
+                _pad: [0; 2],
+            };
+            let thermal_descriptor_set = rxn.thermal_descriptor_sets[temperature_current_buffer];
+            self.record_temperature_dispatch(self.command_buffer, rxn, thermal_descriptor_set, &thermal_push);
+            temperature_current_buffer = 1 - temperature_current_buffer;
+            self.record_compute_buffer_barrier(
+                self.command_buffer,
+                Self::temperature_buffer_handle(rxn, temperature_current_buffer),
+            );
+        }
+
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer)?;
+
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&self.command_buffer));
+
+            self.device.reset_fences(&[self.fence])?;
+            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
+        }
+
+        if let Some(rxn) = self.reaction.as_mut() {
+            rxn.temperature_current_buffer = temperature_current_buffer;
+        }
+
+        Ok(())
+    }
+
     /// Run one diffusion step on the GPU.
     pub fn step(&mut self, dt: f32, diffusion_rate: f32) -> Result<()> {
         let push_constants = DiffusionPushConstants {
