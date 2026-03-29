@@ -119,6 +119,7 @@ impl DemoApp {
             height: 512,
             diffusion_rate: 5.0,
             thermal_diffusion_rate: 3.0,
+            charge_correction_strength: 1.0,
             diffusion_substeps: 4,
             inspection_mip: self.inspection_mip,
             time_scale: 20.0,

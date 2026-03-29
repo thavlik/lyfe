@@ -28,6 +28,9 @@ pub struct SimulationConfig {
     pub diffusion_rate: f32,
     /// Base thermal diffusion multiplier for the temperature field
     pub thermal_diffusion_rate: f32,
+    /// Strength of local electroneutrality projection after transport/reaction.
+    /// `1.0` enforces exact per-cell neutrality every pass.
+    pub charge_correction_strength: f32,
     /// Minimum diffusion sub-steps per frame (actual count is computed
     /// dynamically from the CFL stability condition and may be higher)
     pub diffusion_substeps: u32,
@@ -50,6 +53,7 @@ impl Default for SimulationConfig {
             height: 512,
             diffusion_rate: 5.0,
             thermal_diffusion_rate: 3.0,
+            charge_correction_strength: 1.0,
             diffusion_substeps: 4,
             inspection_mip: 8,
             time_scale: 20.0,
@@ -122,6 +126,7 @@ impl Simulation {
         let material_ids = scenario.compile_material_ids();
         let temperatures = scenario.compile_temperatures();
         let diffusion_coeffs = scenario.species_registry.diffusion_coefficients();
+        let species_charges = scenario.species_registry.charges();
 
         let mut gpu = GpuSimulation::new(
             scenario.grid.width,
@@ -131,6 +136,7 @@ impl Simulation {
             &solid_mask,
             &material_ids,
             &diffusion_coeffs,
+            &species_charges,
         )?;
 
         gpu.init_reaction_pipeline(&temperatures)?;
@@ -208,12 +214,14 @@ impl Simulation {
         );
         for i in 0..substeps {
             self.gpu.step(substep_dt, self.config.diffusion_rate)?;
+            self.gpu.step_charge_projection(self.config.charge_correction_strength)?;
             self.gpu.step_temperature(substep_dt, self.config.thermal_diffusion_rate)?;
             log::trace!("Completed substep {}", i);
         }
 
         // Run reaction pass with the full simulated dt
         self.gpu.step_reactions(dt_sim)?;
+        self.gpu.step_charge_projection(self.config.charge_correction_strength)?;
         self.gpu.step_temperature(substep_dt, self.config.thermal_diffusion_rate)?;
 
         self.time += dt_sim as f64;

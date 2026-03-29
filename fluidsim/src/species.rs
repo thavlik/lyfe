@@ -54,6 +54,8 @@ pub struct SpeciesInfo {
     pub index: usize,
     /// Diffusion coefficient (m²/s, scaled for simulation)
     pub diffusion_coefficient: f32,
+    /// Integer ionic charge / valence (e.g. H+ = +1, SO4(2-) = -2)
+    pub charge: i32,
 }
 
 impl Default for SpeciesRegistry {
@@ -86,12 +88,14 @@ impl SpeciesRegistry {
 
         let index = self.species.len();
         let name_arc: Arc<str> = name.into();
+        let charge = infer_ionic_charge(name);
         
         self.species.push(SpeciesInfo {
             id,
             name: name_arc.clone(),
             index,
             diffusion_coefficient,
+            charge,
         });
         self.id_to_index.insert(id, index);
         self.name_to_id.insert(name_arc, id);
@@ -140,12 +144,75 @@ impl SpeciesRegistry {
         self.species.iter().map(|s| s.diffusion_coefficient).collect()
     }
 
+    /// Get ionic charges as a dense array for GPU upload.
+    pub fn charges(&self) -> Vec<i32> {
+        self.species.iter().map(|s| s.charge).collect()
+    }
+
     /// Return the largest per-species diffusion coefficient (for CFL checks).
     pub fn max_diffusion_coefficient(&self) -> f32 {
         self.species.iter()
             .map(|s| s.diffusion_coefficient)
             .fold(0.0_f32, f32::max)
     }
+}
+
+fn infer_ionic_charge(name: &str) -> i32 {
+    if let Some(charge) = parse_parenthesized_charge(name) {
+        return charge;
+    }
+    if let Some(charge) = parse_suffix_charge(name) {
+        return charge;
+    }
+    0
+}
+
+fn parse_parenthesized_charge(name: &str) -> Option<i32> {
+    let open = name.rfind('(')?;
+    let close = name.rfind(')')?;
+    if close <= open + 2 || close != name.len() - 1 {
+        return None;
+    }
+    let inner = &name[open + 1..close];
+    parse_charge_token(inner)
+}
+
+fn parse_suffix_charge(name: &str) -> Option<i32> {
+    let trimmed = name.trim();
+    let sign = trimmed.chars().last()?;
+    if sign != '+' && sign != '-' {
+        return None;
+    }
+
+    let prefix = &trimmed[..trimmed.len() - sign.len_utf8()];
+    let trailing_digits: String = prefix.chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+
+    let magnitude = if trailing_digits.is_empty() {
+        1
+    } else {
+        trailing_digits.parse::<i32>().ok()?
+    };
+    Some(if sign == '+' { magnitude } else { -magnitude })
+}
+
+fn parse_charge_token(token: &str) -> Option<i32> {
+    let sign = token.chars().last()?;
+    if sign != '+' && sign != '-' {
+        return None;
+    }
+    let magnitude_text = &token[..token.len() - sign.len_utf8()];
+    let magnitude = if magnitude_text.is_empty() {
+        1
+    } else {
+        magnitude_text.parse::<i32>().ok()?
+    };
+    Some(if sign == '+' { magnitude } else { -magnitude })
 }
 
 /// A map of species concentrations for a single cell.

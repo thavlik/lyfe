@@ -71,6 +71,17 @@ pub struct ThermalPushConstants {
     pub _pad: [u32; 2],
 }
 
+/// Push constants for the charge-neutrality projection shader.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ChargeProjectionPushConstants {
+    pub width: u32,
+    pub height: u32,
+    pub species_count: u32,
+    pub correction_strength: f32,
+    pub _pad: [u32; 3],
+}
+
 /// A single GPU-packed reaction rule (4 × u32).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -208,6 +219,8 @@ pub struct GpuSimulation {
 
     // Diffusion coefficients per species
     pub diffusion_coeffs: GpuBuffer,
+    // Integer ionic charges / valences per species
+    pub species_charges: GpuBuffer,
 
     // Staging buffer for uploads (CpuToGpu)
     pub staging_buffer: GpuBuffer,
@@ -221,6 +234,11 @@ pub struct GpuSimulation {
     pub diffusion_pipeline: vk::Pipeline,
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_sets: Vec<vk::DescriptorSet>, // [0] = A->B, [1] = B->A
+    pub charge_descriptor_set_layout: vk::DescriptorSetLayout,
+    pub charge_pipeline_layout: vk::PipelineLayout,
+    pub charge_projection_pipeline: vk::Pipeline,
+    pub charge_descriptor_pool: vk::DescriptorPool,
+    pub charge_descriptor_sets: Vec<vk::DescriptorSet>, // [0] = A current, [1] = B current
 
     // Command resources
     pub command_pool: vk::CommandPool,
@@ -247,6 +265,7 @@ impl GpuSimulation {
         solid_mask_data: &[u32],
         material_ids_data: &[u32],
         diffusion_coeffs_data: &[f32],
+        species_charges_data: &[i32],
     ) -> Result<Self> {
         let cell_count = (width * height) as usize;
 
@@ -267,6 +286,9 @@ impl GpuSimulation {
         }
         if diffusion_coeffs_data.len() != species_count {
             bail!("Diffusion coeffs has {} entries, expected {}", diffusion_coeffs_data.len(), species_count);
+        }
+        if species_charges_data.len() != species_count {
+            bail!("Species charges has {} entries, expected {}", species_charges_data.len(), species_count);
         }
 
         // Create Vulkan instance
@@ -344,6 +366,7 @@ impl GpuSimulation {
         let conc_buffer_size = (species_count * cell_count * std::mem::size_of::<f32>()) as u64;
         let mask_buffer_size = (cell_count * std::mem::size_of::<u32>()) as u64;
         let coeffs_buffer_size = (species_count * std::mem::size_of::<f32>()) as u64;
+        let charges_buffer_size = (species_count * std::mem::size_of::<i32>()) as u64;
 
         // Create buffers
         let mut alloc = allocator.lock();
@@ -393,8 +416,17 @@ impl GpuSimulation {
             "diffusion_coeffs",
         )?;
 
+        let species_charges = GpuBuffer::new(
+            &device,
+            &mut alloc,
+            charges_buffer_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuOnly,
+            "species_charges",
+        )?;
+
         // Staging buffer for uploads and readback
-        let staging_size = conc_buffer_size.max(mask_buffer_size);
+        let staging_size = conc_buffer_size.max(mask_buffer_size).max(charges_buffer_size);
         let mut staging_buffer = GpuBuffer::new(
             &device,
             &mut alloc,
@@ -454,6 +486,10 @@ impl GpuSimulation {
         // Upload diffusion coefficients
         staging_buffer.write(diffusion_coeffs_data)?;
         Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, diffusion_coeffs.buffer, coeffs_buffer_size, Some(command_buffer))?;
+
+        // Upload species charges
+        staging_buffer.write(species_charges_data)?;
+        Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, species_charges.buffer, charges_buffer_size, Some(command_buffer))?;
 
         // Create descriptor set layout
         let bindings = [
@@ -534,6 +570,70 @@ impl GpuSimulation {
 
         unsafe { device.destroy_shader_module(shader_module, None) };
 
+        let charge_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+
+        let charge_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&charge_bindings);
+        let charge_descriptor_set_layout = unsafe {
+            device.create_descriptor_set_layout(&charge_layout_info, None)?
+        };
+
+        let charge_push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(std::mem::size_of::<ChargeProjectionPushConstants>() as u32);
+
+        let charge_pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&charge_descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&charge_push_constant_range));
+        let charge_pipeline_layout = unsafe {
+            device.create_pipeline_layout(&charge_pipeline_layout_info, None)?
+        };
+
+        let charge_spirv = compiler.compile_into_spirv(
+            include_str!("../shaders/charge_projection.comp"),
+            shaderc::ShaderKind::Compute,
+            "charge_projection.comp",
+            "main",
+            Some(&options),
+        ).context("Failed to compile charge projection shader")?;
+
+        let charge_shader_module_info = vk::ShaderModuleCreateInfo::default()
+            .code(charge_spirv.as_binary());
+        let charge_shader_module = unsafe { device.create_shader_module(&charge_shader_module_info, None)? };
+
+        let charge_stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(charge_shader_module)
+            .name(entry_name);
+
+        let charge_pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(charge_stage_info)
+            .layout(charge_pipeline_layout);
+
+        let charge_projection_pipeline = unsafe {
+            device.create_compute_pipelines(vk::PipelineCache::null(), &[charge_pipeline_info], None)
+                .map_err(|e| anyhow::anyhow!("Failed to create charge projection pipeline: {:?}", e.1))?[0]
+        };
+
+        unsafe { device.destroy_shader_module(charge_shader_module, None) };
+
         // Create descriptor pool and sets
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
@@ -551,6 +651,22 @@ impl GpuSimulation {
             .descriptor_pool(descriptor_pool)
             .set_layouts(&layouts);
         let descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info)? };
+
+        let charge_pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(6),
+        ];
+        let charge_pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(2)
+            .pool_sizes(&charge_pool_sizes);
+        let charge_descriptor_pool = unsafe { device.create_descriptor_pool(&charge_pool_info, None)? };
+
+        let charge_layouts = [charge_descriptor_set_layout, charge_descriptor_set_layout];
+        let charge_alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(charge_descriptor_pool)
+            .set_layouts(&charge_layouts);
+        let charge_descriptor_sets = unsafe { device.allocate_descriptor_sets(&charge_alloc_info)? };
 
         // Update descriptor sets
         // Set 0: A -> B
@@ -577,6 +693,28 @@ impl GpuSimulation {
             conc_buffer_size,
             mask_buffer_size,
             coeffs_buffer_size,
+        );
+
+        Self::update_charge_descriptor_set(
+            &device,
+            charge_descriptor_sets[0],
+            conc_buffer_a.buffer,
+            solid_mask.buffer,
+            species_charges.buffer,
+            conc_buffer_size,
+            mask_buffer_size,
+            charges_buffer_size,
+        );
+
+        Self::update_charge_descriptor_set(
+            &device,
+            charge_descriptor_sets[1],
+            conc_buffer_b.buffer,
+            solid_mask.buffer,
+            species_charges.buffer,
+            conc_buffer_size,
+            mask_buffer_size,
+            charges_buffer_size,
         );
 
         // Create coarse grid for async tooltip readback (mip 8)
@@ -613,6 +751,7 @@ impl GpuSimulation {
             solid_mask,
             material_ids,
             diffusion_coeffs,
+            species_charges,
             staging_buffer,
             readback_buffer,
             descriptor_set_layout,
@@ -620,6 +759,11 @@ impl GpuSimulation {
             diffusion_pipeline,
             descriptor_pool,
             descriptor_sets,
+            charge_descriptor_set_layout,
+            charge_pipeline_layout,
+            charge_projection_pipeline,
+            charge_descriptor_pool,
+            charge_descriptor_sets,
             command_pool,
             command_buffer,
             fence,
@@ -723,6 +867,50 @@ impl GpuSimulation {
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(&coeffs_info),
+        ];
+
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+    }
+
+    fn update_charge_descriptor_set(
+        device: &ash::Device,
+        set: vk::DescriptorSet,
+        conc_buffer: vk::Buffer,
+        mask_buffer: vk::Buffer,
+        charges_buffer: vk::Buffer,
+        conc_size: u64,
+        mask_size: u64,
+        charges_size: u64,
+    ) {
+        let conc_info = [vk::DescriptorBufferInfo::default()
+            .buffer(conc_buffer)
+            .offset(0)
+            .range(conc_size)];
+        let mask_info = [vk::DescriptorBufferInfo::default()
+            .buffer(mask_buffer)
+            .offset(0)
+            .range(mask_size)];
+        let charges_info = [vk::DescriptorBufferInfo::default()
+            .buffer(charges_buffer)
+            .offset(0)
+            .range(charges_size)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&conc_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&mask_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&charges_info),
         ];
 
         unsafe { device.update_descriptor_sets(&writes, &[]) };
@@ -921,6 +1109,65 @@ impl GpuSimulation {
 
         // Swap buffers
         self.current_buffer = 1 - self.current_buffer;
+
+        Ok(())
+    }
+
+    /// Project the current concentration buffer onto a locally electroneutral state.
+    pub fn step_charge_projection(&mut self, correction_strength: f32) -> Result<()> {
+        let push_constants = ChargeProjectionPushConstants {
+            width: self.width,
+            height: self.height,
+            species_count: self.species_count as u32,
+            correction_strength,
+            _pad: [0; 3],
+        };
+
+        let descriptor_set = self.charge_descriptor_sets[self.current_buffer];
+
+        unsafe {
+            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+
+            self.device.cmd_bind_pipeline(
+                self.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.charge_projection_pipeline,
+            );
+
+            self.device.cmd_bind_descriptor_sets(
+                self.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.charge_pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+
+            self.device.cmd_push_constants(
+                self.command_buffer,
+                self.charge_pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&push_constants),
+            );
+
+            let workgroup_size = 256u32;
+            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(self.command_buffer, num_groups, 1, 1);
+
+            self.device.end_command_buffer(self.command_buffer)?;
+
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&self.command_buffer));
+
+            self.device.reset_fences(&[self.fence])?;
+            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
+        }
 
         Ok(())
     }
@@ -1586,6 +1833,11 @@ impl Drop for GpuSimulation {
             }
             log::info!("GpuSimulation::drop - reaction pipeline dropped");
 
+            self.device.destroy_descriptor_pool(self.charge_descriptor_pool, None);
+            self.device.destroy_pipeline(self.charge_projection_pipeline, None);
+            self.device.destroy_pipeline_layout(self.charge_pipeline_layout, None);
+            self.device.destroy_descriptor_set_layout(self.charge_descriptor_set_layout, None);
+
             self.device.destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_pipeline(self.diffusion_pipeline, None);
             self.device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -1608,6 +1860,9 @@ impl Drop for GpuSimulation {
             
             self.device.destroy_buffer(self.diffusion_coeffs.buffer, None);
             alloc.free(std::mem::take(&mut self.diffusion_coeffs.allocation)).ok();
+
+            self.device.destroy_buffer(self.species_charges.buffer, None);
+            alloc.free(std::mem::take(&mut self.species_charges.allocation)).ok();
             
             self.device.destroy_buffer(self.staging_buffer.buffer, None);
             alloc.free(std::mem::take(&mut self.staging_buffer.allocation)).ok();
