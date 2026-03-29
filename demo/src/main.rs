@@ -28,6 +28,7 @@ use winit::{
 const _TARGET_FPS: f64 = 60.0;
 const _FRAME_TIME: Duration = Duration::from_nanos((1_000_000_000.0 / _TARGET_FPS) as u64);
 const PERFORMANCE_WINDOW: Duration = Duration::from_secs(30);
+const TOOLTIP_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy)]
 struct PerformanceSample {
@@ -96,6 +97,7 @@ struct DemoApp {
     show_tooltip: bool,
     tooltip_text: String,
     species_names: Vec<String>,  // Cached species names for tooltip display
+    last_tooltip_coord: Option<(u32, u32)>,
     
     // Thermal view (momentary display while T is held)
     thermal_view: bool,
@@ -127,6 +129,7 @@ impl DemoApp {
             show_tooltip: false,
             tooltip_text: String::new(),
             species_names: Vec::new(),
+            last_tooltip_coord: None,
             thermal_view: false,
             performance_overlay: false,
             last_frame: Instant::now(),
@@ -189,6 +192,9 @@ impl DemoApp {
             .iter()
             .map(|s| s.name.to_string())
             .collect();
+
+        let mut simulation = simulation;
+        simulation.set_async_inspection_interval(TOOLTIP_REFRESH_INTERVAL);
         
         self.window = Some(window);
         self.render_ctx = Some(render_ctx);
@@ -213,9 +219,26 @@ impl DemoApp {
             let logical_h = size.height as f32 / scale;
             let grid_x = self.mouse_pos.0 * grid_w as f32 / logical_w;
             let grid_y = self.mouse_pos.1 * grid_h as f32 / logical_h;
+            let coarse_coord = match (sim.coarse_dimensions(), sim.coarse_mip_factor()) {
+                (Some((coarse_w, coarse_h)), Some(mip)) => {
+                    let coarse_x = ((grid_x.max(0.0) as u32) / mip).min(coarse_w.saturating_sub(1));
+                    let coarse_y = ((grid_y.max(0.0) as u32) / mip).min(coarse_h.saturating_sub(1));
+                    Some((coarse_x, coarse_y))
+                }
+                _ => None,
+            };
             
-            // Request async readback of this cell (rate-limited internally)
-            let _ = sim.request_async_inspection(grid_x, grid_y);
+            let cached_data = sim.get_cached_inspection();
+            let cached_matches_hover = cached_data.as_ref().map(|data| data.coord) == coarse_coord;
+            let cached_is_stale = cached_data.as_ref()
+                .map(|data| data.age >= TOOLTIP_REFRESH_INTERVAL)
+                .unwrap_or(true);
+            let hover_changed = coarse_coord != self.last_tooltip_coord;
+
+            if !sim.is_inspection_pending() && (hover_changed || !cached_matches_hover || cached_is_stale) {
+                let _ = sim.request_async_inspection(grid_x, grid_y);
+            }
+            self.last_tooltip_coord = coarse_coord;
             
             // Poll for any completed readbacks
             if let Some(data) = sim.poll_async_inspection() {
@@ -246,7 +269,7 @@ impl DemoApp {
                     species_lines,
                 );
                 self.show_tooltip = true;
-            } else if let Some(data) = sim.get_cached_inspection() {
+            } else if let Some(data) = cached_data {
                 // Use cached data (may be stale)
                 let mut species_rows: Vec<_> = data.concentrations.iter()
                     .enumerate()

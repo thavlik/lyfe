@@ -16,6 +16,7 @@ use crate::species::SpeciesRegistry;
 
 use anyhow::Result;
 use ash::vk;
+use std::time::Duration;
 
 
 /// Configuration for the simulation.
@@ -131,6 +132,8 @@ pub struct Simulation {
     pending_kinetics_evaluation: bool,
     /// Whether CPU readback-driven runtime features are allowed.
     runtime_readbacks_enabled: bool,
+    /// Whether low-frequency async coarse inspection readbacks are allowed.
+    inspection_readbacks_enabled: bool,
 }
 
 impl Simulation {
@@ -189,6 +192,7 @@ impl Simulation {
 
         gpu.init_reaction_pipeline(&temperatures)?;
         let runtime_readbacks_enabled = !gpu.uses_shared_vulkan_context();
+        let inspection_readbacks_enabled = true;
 
         let mut simulation = Self {
             grid: scenario.grid,
@@ -210,6 +214,7 @@ impl Simulation {
             update_applicator: SemanticUpdateApplicator::new(),
             pending_kinetics_evaluation: false,
             runtime_readbacks_enabled,
+            inspection_readbacks_enabled,
         };
 
         simulation.bootstrap_kinetics(
@@ -647,7 +652,7 @@ impl Simulation {
     /// Request an async readback of the coarse cell at the given screen position.
     /// Returns true if the request was accepted, false if rate-limited or no coarse grid.
     pub fn request_async_inspection(&mut self, screen_x: f32, screen_y: f32) -> bool {
-        if !self.runtime_readbacks_enabled {
+        if !self.inspection_readbacks_enabled {
             return false;
         }
 
@@ -663,7 +668,7 @@ impl Simulation {
     /// Returns Some(data) if new data is available, None otherwise.
     /// This method never blocks.
     pub fn poll_async_inspection(&mut self) -> Option<CoarseCellData> {
-        if !self.runtime_readbacks_enabled {
+        if !self.inspection_readbacks_enabled {
             return None;
         }
 
@@ -677,7 +682,7 @@ impl Simulation {
     /// Get the last cached coarse cell data, even if stale.
     /// The `age` field indicates how old the data is.
     pub fn get_cached_inspection(&self) -> Option<CoarseCellData> {
-        if !self.runtime_readbacks_enabled {
+        if !self.inspection_readbacks_enabled {
             return None;
         }
 
@@ -694,6 +699,12 @@ impl Simulation {
             coarse.is_readback_pending()
         } else {
             false
+        }
+    }
+
+    pub fn set_async_inspection_interval(&mut self, interval: Duration) {
+        if let Some(ref mut coarse) = self.gpu.coarse_grid {
+            coarse.set_read_interval(interval);
         }
     }
 
