@@ -234,9 +234,21 @@ impl DemoApp {
         let sim = self.simulation.as_mut().unwrap();
         let egui = self.egui_renderer.as_mut().unwrap();
         
+        // Begin frame first - this waits on the in-flight fence,
+        // ensuring the previous frame's commands have completed
+        // before we touch the command pool or queue.
+        let image_index = match ctx.begin_frame()? {
+            Some(idx) => idx,
+            None => {
+                log::debug!("begin_frame returned None, needs resize");
+                self.needs_resize = true;
+                return Ok(false);
+            }
+        };
+
         let t0 = Instant::now();
         
-        // Get render state and upload
+        // Get render state and upload (safe now that previous frame is done)
         let state = sim.render_state()?;
         let t1 = Instant::now();
         
@@ -253,16 +265,6 @@ impl DemoApp {
 
         // Update egui textures before rendering
         egui.set_textures(ctx)?;
-        
-        // Begin frame
-        let image_index = match ctx.begin_frame()? {
-            Some(idx) => idx,
-            None => {
-                log::debug!("begin_frame returned None, needs resize");
-                self.needs_resize = true;
-                return Ok(false);
-            }
-        };
         
         log::trace!("Rendering to swapchain image {}", image_index);
         

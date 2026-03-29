@@ -830,6 +830,9 @@ impl Drop for GpuSimulation {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().ok();
+            
+            // Drop coarse_grid FIRST - it holds cloned device handle and references our buffers
+            drop(self.coarse_grid.take());
 
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
