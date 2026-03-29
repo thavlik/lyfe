@@ -48,6 +48,7 @@ pub use grid::{Grid, CellCoord};
 pub use solid::{MaterialId, SolidCellMeta, SolidGeometry};
 pub use scenario::{Scenario, ScenarioBuilder, create_acid_base_scenario};
 pub use sim::{Simulation, SimulationConfig, RenderState};
+pub use gpu::{GpuRenderBuffers, SharedGpuContext};
 pub use inspect::{InspectionResult, CoarseCellCoord};
 pub use chemistry::{ChemicalEvolutionRule, NoOpEvolution};
 pub use coarse::{CoarseGrid, CoarseCellData};

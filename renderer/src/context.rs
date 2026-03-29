@@ -4,6 +4,7 @@ use std::ffi::CStr;
 
 use anyhow::{Context as _, Result, bail};
 use ash::vk;
+use fluidsim::SharedGpuContext;
 use gpu_allocator::vulkan::Allocator;
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
@@ -113,13 +114,14 @@ impl RenderContext {
             .enumerate()
             .position(|(i, qf)| {
                 qf.queue_flags.contains(vk::QueueFlags::GRAPHICS) &&
+                qf.queue_flags.contains(vk::QueueFlags::COMPUTE) &&
                 unsafe {
                     surface_loader.get_physical_device_surface_support(
                         physical_device, i as u32, surface
                     ).unwrap_or(false)
                 }
             })
-            .context("No graphics queue with present support")? as u32;
+            .context("No graphics+compute queue with present support")? as u32;
 
         // Create logical device
         let queue_priority = [1.0f32];
@@ -499,6 +501,17 @@ impl RenderContext {
 
     pub fn current_command_buffer(&self) -> vk::CommandBuffer {
         self.command_buffers[self.current_frame]
+    }
+
+    pub fn shared_gpu_context(&self) -> SharedGpuContext {
+        SharedGpuContext {
+            instance: self.instance.clone(),
+            physical_device: self.physical_device,
+            device: self.device.clone(),
+            queue: self.graphics_queue,
+            queue_family: self.graphics_queue_family,
+            allocator: self.allocator.as_ref().unwrap().clone(),
+        }
     }
 }
 

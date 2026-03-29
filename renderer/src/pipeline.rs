@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result};
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
-use fluidsim::RenderState;
+use fluidsim::{GpuRenderBuffers, RenderState};
 use gpu_allocator::vulkan::{Allocator, AllocationCreateDesc, AllocationScheme, Allocation};
 use gpu_allocator::MemoryLocation;
 
@@ -105,6 +105,7 @@ pub struct RenderPipeline {
     
     // Frame counter for debug visualization
     pub frame_counter: u32,
+    pub bound_gpu_buffers: Option<GpuRenderBuffers>,
 }
 
 impl RenderPipeline {
@@ -413,7 +414,71 @@ impl RenderPipeline {
             species_count,
             cell_count,
             frame_counter: 0,
+            bound_gpu_buffers: None,
         })
+    }
+
+    pub fn bind_simulation_buffers(&mut self, ctx: &RenderContext, buffers: GpuRenderBuffers) {
+        if self.bound_gpu_buffers == Some(buffers) {
+            return;
+        }
+
+        let conc_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
+        let mask_size = (self.cell_count * std::mem::size_of::<u32>()) as u64;
+        let color_size = (self.species_count.max(1) * std::mem::size_of::<[f32; 4]>()) as u64;
+        let temp_size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
+
+        let conc_info = [vk::DescriptorBufferInfo::default()
+            .buffer(buffers.concentration)
+            .offset(0)
+            .range(conc_size)];
+        let mask_info = [vk::DescriptorBufferInfo::default()
+            .buffer(buffers.solid_mask)
+            .offset(0)
+            .range(mask_size)];
+        let mat_info = [vk::DescriptorBufferInfo::default()
+            .buffer(buffers.material_ids)
+            .offset(0)
+            .range(mask_size)];
+        let color_info = [vk::DescriptorBufferInfo::default()
+            .buffer(self.species_color_buffer.buffer)
+            .offset(0)
+            .range(color_size)];
+        let temp_info = [vk::DescriptorBufferInfo::default()
+            .buffer(buffers.temperature)
+            .offset(0)
+            .range(temp_size)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&conc_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&mask_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&mat_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&color_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&temp_info),
+        ];
+
+        unsafe { ctx.device.update_descriptor_sets(&writes, &[]) };
+        self.bound_gpu_buffers = Some(buffers);
     }
 
     /// Upload render state data to GPU using synchronous copies.

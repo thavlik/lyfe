@@ -28,6 +28,24 @@ use std::sync::Arc;
 
 use crate::coarse::CoarseGrid;
 
+#[derive(Clone)]
+pub struct SharedGpuContext {
+    pub instance: ash::Instance,
+    pub physical_device: vk::PhysicalDevice,
+    pub device: ash::Device,
+    pub queue: vk::Queue,
+    pub queue_family: u32,
+    pub allocator: Arc<Mutex<Allocator>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuRenderBuffers {
+    pub concentration: vk::Buffer,
+    pub solid_mask: vk::Buffer,
+    pub material_ids: vk::Buffer,
+    pub temperature: vk::Buffer,
+}
+
 /// Push constants for the diffusion compute shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -201,6 +219,7 @@ pub struct GpuSimulation {
 
     // Memory allocator
     pub allocator: Option<Arc<Mutex<Allocator>>>,
+    pub owns_vulkan_context: bool,
 
     // Grid dimensions
     pub width: u32,
@@ -267,9 +286,130 @@ impl GpuSimulation {
         diffusion_coeffs_data: &[f32],
         species_charges_data: &[i32],
     ) -> Result<Self> {
+        let context = Self::create_owned_context()?;
+        Self::new_from_context(
+            context,
+            true,
+            width,
+            height,
+            species_count,
+            initial_concentrations,
+            solid_mask_data,
+            material_ids_data,
+            diffusion_coeffs_data,
+            species_charges_data,
+        )
+    }
+
+    pub fn new_with_shared_context(
+        context: SharedGpuContext,
+        width: u32,
+        height: u32,
+        species_count: usize,
+        initial_concentrations: &[Vec<f32>],
+        solid_mask_data: &[u32],
+        material_ids_data: &[u32],
+        diffusion_coeffs_data: &[f32],
+        species_charges_data: &[i32],
+    ) -> Result<Self> {
+        Self::new_from_context(
+            context,
+            false,
+            width,
+            height,
+            species_count,
+            initial_concentrations,
+            solid_mask_data,
+            material_ids_data,
+            diffusion_coeffs_data,
+            species_charges_data,
+        )
+    }
+
+    fn create_owned_context() -> Result<SharedGpuContext> {
+        let entry = unsafe { ash::Entry::load()? };
+
+        let app_name = c"FluidSim";
+        let engine_name = c"FluidSim Engine";
+
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(app_name)
+            .application_version(vk::make_api_version(0, 1, 0, 0))
+            .engine_name(engine_name)
+            .engine_version(vk::make_api_version(0, 1, 0, 0))
+            .api_version(vk::API_VERSION_1_2);
+
+        let instance_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info);
+
+        let instance = unsafe { entry.create_instance(&instance_info, None)? };
+
+        let physical_devices = unsafe { instance.enumerate_physical_devices()? };
+        if physical_devices.is_empty() {
+            bail!("No Vulkan-capable GPU found");
+        }
+
+        let physical_device = physical_devices.into_iter()
+            .max_by_key(|&pd| {
+                let props = unsafe { instance.get_physical_device_properties(pd) };
+                match props.device_type {
+                    vk::PhysicalDeviceType::DISCRETE_GPU => 3,
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => 2,
+                    vk::PhysicalDeviceType::VIRTUAL_GPU => 1,
+                    _ => 0,
+                }
+            })
+            .unwrap();
+
+        let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let compute_queue_family = queue_families.iter()
+            .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
+            .context("No compute queue family found")? as u32;
+
+        let queue_priority = [1.0f32];
+        let queue_info = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(compute_queue_family)
+            .queue_priorities(&queue_priority);
+
+        let device_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(std::slice::from_ref(&queue_info));
+
+        let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
+        let queue = unsafe { device.get_device_queue(compute_queue_family, 0) };
+
+        let allocator = Allocator::new(&gpu_allocator::vulkan::AllocatorCreateDesc {
+            instance: instance.clone(),
+            device: device.clone(),
+            physical_device,
+            debug_settings: Default::default(),
+            buffer_device_address: false,
+            allocation_sizes: Default::default(),
+        })?;
+
+        Ok(SharedGpuContext {
+            instance,
+            physical_device,
+            device,
+            queue,
+            queue_family: compute_queue_family,
+            allocator: Arc::new(Mutex::new(allocator)),
+        })
+    }
+
+    fn new_from_context(
+        context: SharedGpuContext,
+        owns_vulkan_context: bool,
+        width: u32,
+        height: u32,
+        species_count: usize,
+        initial_concentrations: &[Vec<f32>],
+        solid_mask_data: &[u32],
+        material_ids_data: &[u32],
+        diffusion_coeffs_data: &[f32],
+        species_charges_data: &[i32],
+    ) -> Result<Self> {
         let cell_count = (width * height) as usize;
 
-        // Validate input sizes
         if initial_concentrations.len() != species_count {
             bail!("Expected {} species, got {}", species_count, initial_concentrations.len());
         }
@@ -291,86 +431,22 @@ impl GpuSimulation {
             bail!("Species charges has {} entries, expected {}", species_charges_data.len(), species_count);
         }
 
-        // Create Vulkan instance
-        let entry = unsafe { ash::Entry::load()? };
-        
-        let app_name = c"FluidSim";
-        let engine_name = c"FluidSim Engine";
-        
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(app_name)
-            .application_version(vk::make_api_version(0, 1, 0, 0))
-            .engine_name(engine_name)
-            .engine_version(vk::make_api_version(0, 1, 0, 0))
-            .api_version(vk::API_VERSION_1_2);
-
-        let extensions: Vec<*const i8> = vec![];
-
-        let instance_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_extension_names(&extensions);
-
-        let instance = unsafe { entry.create_instance(&instance_info, None)? };
-
-        // Select physical device (prefer discrete GPU)
-        let physical_devices = unsafe { instance.enumerate_physical_devices()? };
-        if physical_devices.is_empty() {
-            bail!("No Vulkan-capable GPU found");
-        }
-
-        let physical_device = physical_devices.into_iter()
-            .max_by_key(|&pd| {
-                let props = unsafe { instance.get_physical_device_properties(pd) };
-                match props.device_type {
-                    vk::PhysicalDeviceType::DISCRETE_GPU => 3,
-                    vk::PhysicalDeviceType::INTEGRATED_GPU => 2,
-                    vk::PhysicalDeviceType::VIRTUAL_GPU => 1,
-                    _ => 0,
-                }
-            })
-            .unwrap();
-
-        // Find compute queue family
-        let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-        let compute_queue_family = queue_families.iter()
-            .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
-            .context("No compute queue family found")? as u32;
-
-        // Create logical device
-        let queue_priority = [1.0f32];
-        let queue_info = vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(compute_queue_family)
-            .queue_priorities(&queue_priority);
-
-        let device_extensions: Vec<*const i8> = vec![];
-
-        let device_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(std::slice::from_ref(&queue_info))
-            .enabled_extension_names(&device_extensions);
-
-        let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
-        let compute_queue = unsafe { device.get_device_queue(compute_queue_family, 0) };
-
-        // Create memory allocator
-        let allocator = Allocator::new(&gpu_allocator::vulkan::AllocatorCreateDesc {
-            instance: instance.clone(),
-            device: device.clone(),
+        let SharedGpuContext {
+            instance,
             physical_device,
-            debug_settings: Default::default(),
-            buffer_device_address: false,
-            allocation_sizes: Default::default(),
-        })?;
-        let allocator = Arc::new(Mutex::new(allocator));
+            device,
+            queue: compute_queue,
+            queue_family: compute_queue_family,
+            allocator,
+        } = context;
 
-        // Calculate buffer sizes
         let conc_buffer_size = (species_count * cell_count * std::mem::size_of::<f32>()) as u64;
         let mask_buffer_size = (cell_count * std::mem::size_of::<u32>()) as u64;
         let coeffs_buffer_size = (species_count * std::mem::size_of::<f32>()) as u64;
         let charges_buffer_size = (species_count * std::mem::size_of::<i32>()) as u64;
 
-        // Create buffers
         let mut alloc = allocator.lock();
-        
+
         let conc_buffer_a = GpuBuffer::new(
             &device,
             &mut alloc,
@@ -425,7 +501,6 @@ impl GpuSimulation {
             "species_charges",
         )?;
 
-        // Staging buffer for uploads and readback
         let staging_size = conc_buffer_size.max(mask_buffer_size).max(charges_buffer_size);
         let mut staging_buffer = GpuBuffer::new(
             &device,
@@ -435,21 +510,18 @@ impl GpuSimulation {
             MemoryLocation::CpuToGpu,
             "staging",
         )?;
-        
-        // Readback buffer for GPU->CPU transfers
-        // Use CpuToGpu since some drivers have issues with GpuToCpu
+
         let readback_buffer = GpuBuffer::new(
             &device,
             &mut alloc,
             staging_size,
             vk::BufferUsageFlags::TRANSFER_DST,
-            MemoryLocation::CpuToGpu,  // CpuToGpu also works for reads on most drivers
+            MemoryLocation::CpuToGpu,
             "readback",
         )?;
 
         drop(alloc);
 
-        // Create command pool and buffer for uploads
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(compute_queue_family)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
@@ -464,54 +536,42 @@ impl GpuSimulation {
         let fence_info = vk::FenceCreateInfo::default();
         let fence = unsafe { device.create_fence(&fence_info, None)? };
 
-        // Upload initial data
-        // Flatten concentration data
         let mut flat_conc: Vec<f32> = Vec::with_capacity(species_count * cell_count);
         for species_conc in initial_concentrations {
             flat_conc.extend_from_slice(species_conc);
         }
 
-        // Upload concentrations
         staging_buffer.write(&flat_conc)?;
         Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, conc_buffer_a.buffer, conc_buffer_size, Some(command_buffer))?;
 
-        // Upload solid mask
         staging_buffer.write(solid_mask_data)?;
         Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, solid_mask.buffer, mask_buffer_size, Some(command_buffer))?;
 
-        // Upload material IDs
         staging_buffer.write(material_ids_data)?;
         Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, material_ids.buffer, mask_buffer_size, Some(command_buffer))?;
 
-        // Upload diffusion coefficients
         staging_buffer.write(diffusion_coeffs_data)?;
         Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, diffusion_coeffs.buffer, coeffs_buffer_size, Some(command_buffer))?;
 
-        // Upload species charges
         staging_buffer.write(species_charges_data)?;
         Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, species_charges.buffer, charges_buffer_size, Some(command_buffer))?;
 
-        // Create descriptor set layout
         let bindings = [
-            // Binding 0: Source concentrations (read)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 1: Destination concentrations (write)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 2: Solid mask
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 3: Diffusion coefficients
             vk::DescriptorSetLayoutBinding::default()
                 .binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -523,7 +583,6 @@ impl GpuSimulation {
             .bindings(&bindings);
         let descriptor_set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
 
-        // Create pipeline layout with push constants
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
@@ -534,7 +593,6 @@ impl GpuSimulation {
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
         let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
-        // Compile diffusion shader
         let shader_source = include_str!("../shaders/diffusion.comp");
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
         let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
@@ -634,11 +692,10 @@ impl GpuSimulation {
 
         unsafe { device.destroy_shader_module(charge_shader_module, None) };
 
-        // Create descriptor pool and sets
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(8), // 4 bindings * 2 sets
+                .descriptor_count(8),
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -668,8 +725,6 @@ impl GpuSimulation {
             .set_layouts(&charge_layouts);
         let charge_descriptor_sets = unsafe { device.allocate_descriptor_sets(&charge_alloc_info)? };
 
-        // Update descriptor sets
-        // Set 0: A -> B
         Self::update_descriptor_set(
             &device,
             descriptor_sets[0],
@@ -682,7 +737,6 @@ impl GpuSimulation {
             coeffs_buffer_size,
         );
 
-        // Set 1: B -> A
         Self::update_descriptor_set(
             &device,
             descriptor_sets[1],
@@ -717,7 +771,6 @@ impl GpuSimulation {
             charges_buffer_size,
         );
 
-        // Create coarse grid for async tooltip readback (mip 8)
         let coarse_grid = CoarseGrid::new(
             device.clone(),
             compute_queue,
@@ -726,13 +779,13 @@ impl GpuSimulation {
             width,
             height,
             species_count,
-            8, // mip factor
+            8,
             conc_buffer_a.buffer,
             conc_buffer_b.buffer,
             solid_mask.buffer,
             conc_buffer_size,
             mask_buffer_size,
-        ).ok(); // Don't fail if coarse grid creation fails
+        ).ok();
 
         Ok(Self {
             instance,
@@ -741,6 +794,7 @@ impl GpuSimulation {
             compute_queue,
             compute_queue_family,
             allocator: Some(allocator),
+            owns_vulkan_context,
             width,
             height,
             cell_count,
@@ -1578,6 +1632,68 @@ impl GpuSimulation {
         }
     }
 
+    pub fn current_temperature_buffer(&self) -> vk::Buffer {
+        self.reaction.as_ref()
+            .map(|rxn| Self::temperature_buffer_handle(rxn, rxn.temperature_current_buffer))
+            .unwrap_or(vk::Buffer::null())
+    }
+
+    pub fn render_buffers(&self) -> GpuRenderBuffers {
+        GpuRenderBuffers {
+            concentration: self.current_concentration_buffer(),
+            solid_mask: self.solid_mask.buffer,
+            material_ids: self.material_ids.buffer,
+            temperature: self.current_temperature_buffer(),
+        }
+    }
+
+    pub fn record_render_barriers(&self, cmd: vk::CommandBuffer) {
+        let mut barriers = vec![
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(self.current_concentration_buffer())
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(self.solid_mask.buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(self.material_ids.buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+        ];
+
+        let temperature = self.current_temperature_buffer();
+        if temperature != vk::Buffer::null() {
+            barriers.push(
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .buffer(temperature)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+            );
+        }
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &barriers,
+                &[],
+            );
+        }
+    }
+
     /// Initialize the reaction pipeline (lazy, called when first rules arrive).
     ///
     /// Creates: temperature buffer, rules buffer, descriptor sets, pipeline.
@@ -2175,10 +2291,13 @@ impl Drop for GpuSimulation {
             drop(self.allocator.take());
             log::info!("GpuSimulation::drop - allocator dropped, device handle: {:?}", self.device.handle());
 
-            // Temporarily skip destroy to diagnose segfault:
-            log::info!("GpuSimulation::drop - skipping destroy_device/destroy_instance for debugging");
-            // self.device.destroy_device(None);
-            // self.instance.destroy_instance(None);
+            if self.owns_vulkan_context {
+                self.device.destroy_device(None);
+                self.instance.destroy_instance(None);
+                log::info!("GpuSimulation::drop - owned Vulkan context destroyed");
+            } else {
+                log::info!("GpuSimulation::drop - shared Vulkan context left alive");
+            }
             log::info!("GpuSimulation::drop - done");
         }
     }

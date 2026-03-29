@@ -6,7 +6,7 @@
 
 use crate::chemistry::{ChemicalEvolutionRule, NoOpEvolution};
 use crate::coarse::CoarseCellData;
-use crate::gpu::GpuSimulation;
+use crate::gpu::{GpuRenderBuffers, GpuSimulation, SharedGpuContext};
 use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
 use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
@@ -15,6 +15,7 @@ use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
 use anyhow::Result;
+use ash::vk;
 
 
 /// Configuration for the simulation.
@@ -121,6 +122,22 @@ pub struct Simulation {
 impl Simulation {
     /// Create a new simulation from a scenario.
     pub fn from_scenario(scenario: Scenario, config: SimulationConfig) -> Result<Self> {
+        Self::from_scenario_with_gpu_context(scenario, config, None)
+    }
+
+    pub fn from_scenario_with_shared_gpu_context(
+        scenario: Scenario,
+        config: SimulationConfig,
+        context: SharedGpuContext,
+    ) -> Result<Self> {
+        Self::from_scenario_with_gpu_context(scenario, config, Some(context))
+    }
+
+    fn from_scenario_with_gpu_context(
+        scenario: Scenario,
+        config: SimulationConfig,
+        context: Option<SharedGpuContext>,
+    ) -> Result<Self> {
         let concentrations = scenario.compile_concentrations();
         let solid_mask = scenario.compile_solid_mask();
         let material_ids = scenario.compile_material_ids();
@@ -128,16 +145,30 @@ impl Simulation {
         let diffusion_coeffs = scenario.species_registry.diffusion_coefficients();
         let species_charges = scenario.species_registry.charges();
 
-        let mut gpu = GpuSimulation::new(
-            scenario.grid.width,
-            scenario.grid.height,
-            scenario.species_registry.count(),
-            &concentrations,
-            &solid_mask,
-            &material_ids,
-            &diffusion_coeffs,
-            &species_charges,
-        )?;
+        let mut gpu = if let Some(context) = context {
+            GpuSimulation::new_with_shared_context(
+                context,
+                scenario.grid.width,
+                scenario.grid.height,
+                scenario.species_registry.count(),
+                &concentrations,
+                &solid_mask,
+                &material_ids,
+                &diffusion_coeffs,
+                &species_charges,
+            )?
+        } else {
+            GpuSimulation::new(
+                scenario.grid.width,
+                scenario.grid.height,
+                scenario.species_registry.count(),
+                &concentrations,
+                &solid_mask,
+                &material_ids,
+                &diffusion_coeffs,
+                &species_charges,
+            )?
+        };
 
         gpu.init_reaction_pipeline(&temperatures)?;
 
@@ -168,10 +199,20 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
+    pub fn new_demo_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+        let scenario = create_demo_scenario(config.width, config.height);
+        Self::from_scenario_with_shared_gpu_context(scenario, config, context)
+    }
+
     /// Create the acid-base neutralization simulation.
     pub fn new_acid_base(config: SimulationConfig) -> Result<Self> {
         let scenario = create_acid_base_scenario(config.width, config.height);
         Self::from_scenario(scenario, config)
+    }
+
+    pub fn new_acid_base_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+        let scenario = create_acid_base_scenario(config.width, config.height);
+        Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
 
     /// Step the simulation forward by dt seconds of wall-clock time.
@@ -288,20 +329,6 @@ impl Simulation {
                     Err(e) => {
                         log::warn!("Kinetics evaluation failed: {}", e);
                         // Continue with existing parameters - simulation stays stable
-                    }
-                }
-            }
-        }
-
-        // Log sample concentrations every 60 steps
-        if self.step_count % 60 == 1 {
-            if let Ok(concs) = self.gpu.read_concentrations() {
-                // Sample center cell
-                let center_idx = (self.grid.height / 2 * self.grid.width + self.grid.width / 2) as usize;
-                log::info!("Step {}: Sample concentrations at center cell {}:", self.step_count, center_idx);
-                for (s, species_conc) in concs.iter().enumerate() {
-                    if species_conc[center_idx] > 0.0001 {
-                        log::info!("  Species {}: {:.6}", s, species_conc[center_idx]);
                     }
                 }
             }
@@ -436,6 +463,14 @@ impl Simulation {
     /// Get configuration.
     pub fn config(&self) -> &SimulationConfig {
         &self.config
+    }
+
+    pub fn gpu_render_buffers(&self) -> GpuRenderBuffers {
+        self.gpu.render_buffers()
+    }
+
+    pub fn record_render_barriers(&self, cmd: vk::CommandBuffer) {
+        self.gpu.record_render_barriers(cmd);
     }
 
     /// Update diffusion rate.

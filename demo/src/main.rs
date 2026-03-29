@@ -143,9 +143,6 @@ impl DemoApp {
     fn initialize(&mut self, window: Window) -> Result<()> {
         let _size = window.inner_size();
         
-        log::info!("Creating simulation...");
-        
-        // Create simulation
         let config = SimulationConfig {
             width: 512,
             height: 512,
@@ -157,17 +154,17 @@ impl DemoApp {
             time_scale: 20.0,
             max_frame_dt: 1.0 / 15.0,
         };
-        
-        let simulation = match self.scenario {
-            ScenarioKind::Basic => Simulation::new_demo(config)?,
-            ScenarioKind::AcidBase => Simulation::new_acid_base(config)?,
-        };
-        log::info!("Simulation created successfully");
-        
+
         log::info!("Creating render context...");
-        // Create render context
         let render_ctx = RenderContext::new(&window)?;
         log::info!("Render context created successfully");
+
+        log::info!("Creating simulation on shared Vulkan device...");
+        let simulation = match self.scenario {
+            ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
+            ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
+        };
+        log::info!("Simulation created successfully");
         
         log::info!("Creating render pipeline...");
         // Compute species colors: explicit overrides, then hash-based fallback
@@ -506,20 +503,14 @@ impl DemoApp {
         };
 
         let t0 = Instant::now();
-        
-        // Get render state and upload (safe now that previous frame is done)
-        let state = sim.render_state()?;
+        pipeline.bind_simulation_buffers(ctx, sim.gpu_render_buffers());
         let t1 = Instant::now();
-        
-        pipeline.upload_state(ctx, &state)?;
-        let t2 = Instant::now();
         
         // Debug: Log frame presentation
         let step = sim.step_count();
         if step > 0 && step % 10 == 0 {
-            log::info!("Frame timing: render_state={:.1}ms upload={:.1}ms", 
-                (t1-t0).as_secs_f64()*1000.0, 
-                (t2-t1).as_secs_f64()*1000.0);
+            log::info!("Frame timing: bind={:.1}ms", 
+                (t1-t0).as_secs_f64()*1000.0);
         }
 
         // Update egui textures before rendering
@@ -535,6 +526,8 @@ impl DemoApp {
             ctx.device.reset_command_buffer(cmd, ash::vk::CommandBufferResetFlags::empty())?;
             ctx.device.begin_command_buffer(cmd, &begin_info)?;
         }
+
+        sim.record_render_barriers(cmd);
         
         // Record fluid visualization (keeps render pass open)
         pipeline.record(ctx, cmd, image_index as usize, self.thermal_view);
@@ -561,9 +554,9 @@ impl DemoApp {
 
         let t3 = Instant::now();
         Ok(RenderFrameMetrics {
-            render_state_ms: (t1 - t0).as_secs_f64() as f32 * 1000.0,
-            upload_ms: (t2 - t1).as_secs_f64() as f32 * 1000.0,
-            render_ms: (t3 - t2).as_secs_f64() as f32 * 1000.0,
+            render_state_ms: 0.0,
+            upload_ms: (t1 - t0).as_secs_f64() as f32 * 1000.0,
+            render_ms: (t3 - t1).as_secs_f64() as f32 * 1000.0,
         })
     }
 
