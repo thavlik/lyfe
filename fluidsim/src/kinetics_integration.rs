@@ -415,32 +415,34 @@ impl SemanticUpdateApplicator {
         directive: &kinetics::ReactionDirective,
         species_registry: &SpeciesRegistry,
     ) -> Option<GpuReactionRule> {
-        use kinetics::acid_base::REACTION_H_OH_WATER;
+        // Look up reactant species indices by name (rule-agnostic)
+        let a_idx = species_registry.index_of_name(&directive.reactant_a);
+        let b_idx = species_registry.index_of_name(&directive.reactant_b);
 
-        if directive.reaction_id == REACTION_H_OH_WATER {
-            // H⁺ + OH⁻ → H₂O
-            let h_idx = species_registry.index_of_name("H+")?;
-            let oh_idx = species_registry.index_of_name("OH-")?;
+        let (a_idx, b_idx) = match (a_idx, b_idx) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                log::warn!(
+                    "Reaction '{}': species '{}' or '{}' not found in registry, skipping",
+                    directive.reaction_name,
+                    directive.reactant_a,
+                    directive.reactant_b,
+                );
+                return None;
+            }
+        };
 
-            // Scale the rate constant for simulation time scales.
-            // The physical rate is 1.4e11 L/(mol·s), but our simulation
-            // uses discrete time steps and concentration units already in mol/L.
-            // We apply a scaling factor to keep the reaction visible but stable.
-            let scaled_rate = (directive.rate_constant as f32).min(1e6);
+        // Use effective_rate (pre-scaled for GPU stability by the rule source)
+        let rate = directive.effective_rate as f32;
 
-            let enthalpy = directive.enthalpy_delta_j_per_mol
-                .unwrap_or(0.0) as f32;
+        let enthalpy = directive.enthalpy_delta_j_per_mol.unwrap_or(0.0) as f32;
 
-            Some(GpuReactionRule::new(
-                h_idx as u32,
-                oh_idx as u32,
-                scaled_rate,
-                enthalpy,
-            ))
-        } else {
-            log::warn!("Unknown reaction ID {:?}, skipping", directive.reaction_id);
-            None
-        }
+        Some(GpuReactionRule::new(
+            a_idx as u32,
+            b_idx as u32,
+            rate,
+            enthalpy,
+        ))
     }
 }
 

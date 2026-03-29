@@ -202,14 +202,26 @@ impl BoundaryUpdate {
 pub struct ReactionDirective {
     /// The reaction this directive controls
     pub reaction_id: ReactionId,
+    /// Human-readable name for the reaction
+    pub reaction_name: String,
+    /// Reactant A species name (looked up in species registry)
+    pub reactant_a: String,
+    /// Reactant B species name (looked up in species registry)
+    pub reactant_b: String,
     /// Tiles where this reaction should be applied
     pub applicable_tile_ids: Vec<u32>,
     /// Maximum extent per second (limits reaction rate)
     pub max_extent_per_second: f64,
-    /// Rate constant for this reaction
+    /// Physical rate constant (L·mol⁻¹·s⁻¹)
     pub rate_constant: f64,
-    /// Enthalpy change (J/mol, negative = exothermic)
+    /// Effective rate for GPU simulation (pre-scaled for stability)
+    pub effective_rate: f64,
+    /// Enthalpy change ΔH (J/mol, negative = exothermic → heats up)
     pub enthalpy_delta_j_per_mol: Option<f64>,
+    /// Gibbs free energy change ΔG (J/mol, negative = spontaneous)
+    pub gibbs_free_energy_j_per_mol: Option<f64>,
+    /// Entropy change ΔS (J/(mol·K))
+    pub entropy_delta_j_per_mol_k: Option<f64>,
     /// Activation energy (J/mol)
     pub activation_energy_j_per_mol: Option<f64>,
     /// Whether this reaction is reversible
@@ -221,10 +233,16 @@ impl ReactionDirective {
     pub fn new(reaction_id: ReactionId) -> Self {
         Self {
             reaction_id,
+            reaction_name: String::new(),
+            reactant_a: String::new(),
+            reactant_b: String::new(),
             applicable_tile_ids: Vec::new(),
             max_extent_per_second: f64::MAX,
             rate_constant: 1.0,
+            effective_rate: 1.0,
             enthalpy_delta_j_per_mol: None,
+            gibbs_free_energy_j_per_mol: None,
+            entropy_delta_j_per_mol_k: None,
             activation_energy_j_per_mol: None,
             is_reversible: false,
         }

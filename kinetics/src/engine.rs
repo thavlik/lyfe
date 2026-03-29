@@ -5,9 +5,9 @@
 
 use crate::{
     KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate,
-    lean_bridge::LeanBridge,
     noop::NoopEvaluator,
     acid_base::AcidBaseEvaluator,
+    lean_evaluator::LeanEvaluator,
     diagnostics::KineticsDiagnostic,
 };
 
@@ -39,9 +39,6 @@ pub struct KineticsEngine {
     /// The rule evaluator backend
     evaluator: Box<dyn RuleEvaluator>,
     
-    /// Lean bridge (if enabled)
-    lean_bridge: Option<LeanBridge>,
-    
     /// Statistics for monitoring
     stats: EngineStats,
     
@@ -71,24 +68,27 @@ impl KineticsEngine {
     pub fn new(config: KineticsConfig) -> Result<Self, KineticsError> {
         config.validate().map_err(KineticsError::ConfigError)?;
         
-        // Initialize Lean bridge if enabled
-        let lean_bridge = if config.enable_lean {
-            match LeanBridge::new(&config) {
-                Ok(bridge) => Some(bridge),
+        // Select the evaluator: Lean first, then Rust fallback, then noop
+        let evaluator: Box<dyn RuleEvaluator> = if config.enable_lean {
+            match LeanEvaluator::discover() {
+                Ok(lean_eval) => {
+                    log::info!(
+                        "Kinetics engine using Lean rules ({})",
+                        lean_eval.bridge().binary_path().display()
+                    );
+                    Box::new(lean_eval)
+                }
                 Err(e) => {
-                    log::warn!("Failed to initialize Lean bridge: {}. Falling back to no-op.", e);
-                    None
+                    log::warn!("Lean binary not found: {}", e);
+                    if config.enable_reaction_rules {
+                        log::info!("Falling back to Rust acid-base evaluator");
+                        Box::new(AcidBaseEvaluator::new())
+                    } else {
+                        log::info!("Kinetics engine using no-op evaluator");
+                        Box::new(NoopEvaluator::new())
+                    }
                 }
             }
-        } else {
-            None
-        };
-        
-        // Select the evaluator based on configuration and availability
-        let evaluator: Box<dyn RuleEvaluator> = if lean_bridge.is_some() {
-            // TODO: Use Lean-backed evaluator when implemented
-            log::info!("Kinetics engine using Lean-backed rules (placeholder)");
-            Box::new(NoopEvaluator::new())
         } else if config.enable_reaction_rules {
             log::info!("Kinetics engine using acid-base evaluator");
             Box::new(AcidBaseEvaluator::new())
@@ -100,7 +100,6 @@ impl KineticsEngine {
         Ok(Self {
             config,
             evaluator,
-            lean_bridge,
             stats: EngineStats::default(),
             last_evaluation_time: 0.0,
         })
@@ -116,7 +115,6 @@ impl KineticsEngine {
         Ok(Self {
             config,
             evaluator,
-            lean_bridge: None,
             stats: EngineStats::default(),
             last_evaluation_time: 0.0,
         })
@@ -208,9 +206,9 @@ impl KineticsEngine {
         self.stats = EngineStats::default();
     }
     
-    /// Check if the Lean bridge is available.
+    /// Check if the evaluator is Lean-backed.
     pub fn lean_available(&self) -> bool {
-        self.lean_bridge.is_some()
+        self.evaluator.name() == "lean"
     }
     
     /// Get the evaluator name.
@@ -266,7 +264,7 @@ impl std::fmt::Debug for KineticsEngine {
         f.debug_struct("KineticsEngine")
             .field("config", &self.config)
             .field("evaluator", &self.evaluator.name())
-            .field("lean_available", &self.lean_bridge.is_some())
+            .field("lean_available", &self.lean_available())
             .field("stats", &self.stats)
             .finish()
     }

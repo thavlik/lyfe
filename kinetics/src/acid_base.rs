@@ -1,11 +1,15 @@
-//! Acid-base neutralization evaluator.
+//! Acid-base neutralization evaluator (Rust fallback).
 //!
-//! Implements the Lean-inspired rule: H⁺ + OH⁻ → H₂O
-//! with validated thermodynamic parameters.
+//! This is a development fallback for when the Lean binary is not available.
+//! The canonical rule definitions live in `lean/LyfeRules/AcidBase.lean`.
+//! This evaluator duplicates that logic in Rust for convenience.
 //!
-//! This evaluator inspects the semantic snapshot for tiles where both H⁺ and
-//! OH⁻ are present and emits reaction directives with physically accurate
-//! rate constant, enthalpy, and activation energy.
+//! ## Thermodynamics
+//!
+//! H⁺(aq) + OH⁻(aq) → H₂O(l)
+//! - ΔH° = −55,800 J/mol  (exothermic → heats solution)
+//! - ΔG° = −79,900 J/mol  (spontaneous)
+//! - ΔS° = +80.7 J/(mol·K) (positive; OH⁻ has abnormally negative S°)
 
 use crate::{
     KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate,
@@ -20,8 +24,18 @@ pub const REACTION_H_OH_WATER: ReactionId = ReactionId(1);
 /// This is one of the fastest known reactions.
 const RATE_CONSTANT_298K: f64 = 1.4e11;
 
-/// Standard enthalpy of neutralization (J/mol), exothermic → negative.
-const ENTHALPY_DELTA_J_PER_MOL: f64 = -55_900.0;
+/// Effective rate for GPU simulation (scaled down for visual stability).
+const EFFECTIVE_RATE: f64 = 1.0;
+
+/// Standard enthalpy of neutralization ΔH° (J/mol), exothermic → negative.
+const ENTHALPY_DELTA_J_PER_MOL: f64 = -55_800.0;
+
+/// Standard Gibbs free energy change ΔG° (J/mol), spontaneous → negative.
+const GIBBS_FREE_ENERGY_J_PER_MOL: f64 = -79_900.0;
+
+/// Standard entropy change ΔS° (J/(mol·K)).
+/// Positive because OH⁻(aq) has unusually negative standard entropy.
+const ENTROPY_DELTA_J_PER_MOL_K: f64 = 80.7;
 
 /// Activation energy (J/mol). Nearly barrierless proton transfer.
 const ACTIVATION_ENERGY_J_PER_MOL: f64 = 11_000.0;
@@ -102,10 +116,16 @@ impl RuleEvaluator for AcidBaseEvaluator {
 
         let directive = ReactionDirective {
             reaction_id: REACTION_H_OH_WATER,
+            reaction_name: "water_formation".to_string(),
+            reactant_a: "H+".to_string(),
+            reactant_b: "OH-".to_string(),
             applicable_tile_ids: applicable_tiles,
             max_extent_per_second: f64::MAX,
             rate_constant: RATE_CONSTANT_298K,
+            effective_rate: EFFECTIVE_RATE,
             enthalpy_delta_j_per_mol: Some(ENTHALPY_DELTA_J_PER_MOL),
+            gibbs_free_energy_j_per_mol: Some(GIBBS_FREE_ENERGY_J_PER_MOL),
+            entropy_delta_j_per_mol_k: Some(ENTROPY_DELTA_J_PER_MOL_K),
             activation_energy_j_per_mol: Some(ACTIVATION_ENERGY_J_PER_MOL),
             is_reversible: false,
         };

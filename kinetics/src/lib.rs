@@ -34,6 +34,7 @@ pub mod config;
 pub mod engine;
 pub mod noop;
 pub mod lean_bridge;
+pub mod lean_evaluator;
 pub mod diagnostics;
 pub mod acid_base;
 
