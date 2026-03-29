@@ -4,7 +4,7 @@
 //
 // Coloring scheme:
 // - Pure water (zero solute): Light blue
-// - Each species gets a distinct color from hash of its index
+// - Each species gets a pre-computed color from a CPU-side lookup table
 // - 1.0 M concentration = 100% color intensity for that species
 // - Colors are blended with weighted linear interpolation
 
@@ -17,6 +17,7 @@ layout(push_constant) uniform PushConstants {
     uint height;
     uint species_count;
     uint frame_counter;  // For debug animation
+    uint thermal_view;   // 1 = show thermal color ramp, 0 = normal
 };
 
 // Concentrations: [species][cell] layout
@@ -34,62 +35,55 @@ layout(set = 0, binding = 2) readonly buffer MaterialIds {
     uint material_ids[];
 };
 
+// Pre-computed species colors (vec4 per species, RGB + padding)
+layout(set = 0, binding = 3) readonly buffer SpeciesColors {
+    vec4 species_colors[];
+};
+
+// Temperature per cell in Kelvin
+layout(set = 0, binding = 4) readonly buffer Temperatures {
+    float temperatures[];
+};
+
 // Pure water color (light blue)
 const vec3 WATER_COLOR = vec3(0.7, 0.85, 0.95);
 
 // Solid titanium color
 const vec3 TITANIUM_COLOR = vec3(0.6, 0.6, 0.65);
 
-// Water color hue (cyan-blue range, ~0.54 in 0-1 space)
-const float WATER_HUE = 0.54;
-const float WATER_HUE_TOLERANCE = 0.12;  // Avoid hues within this range of water
-
-// Small lookup table of pseudo-random offsets for fast hue adjustment
-const float HUE_OFFSETS[8] = float[8](
-    0.17, 0.31, 0.23, 0.41, 0.13, 0.37, 0.29, 0.19
-);
-
-// Check if hue is too close to water color
-bool is_near_water_hue(float h) {
-    float dist = abs(h - WATER_HUE);
-    // Handle wrap-around (hue is circular)
-    dist = min(dist, 1.0 - dist);
-    return dist < WATER_HUE_TOLERANCE;
-}
-
-// Convert hue to RGB (saturation=1, value=1)
-vec3 hue_to_rgb(float h) {
-    float hue = h * 6.0;
-    float x = 1.0 - abs(mod(hue, 2.0) - 1.0);
+// Thermal color ramp: logarithmic scale from 273.15K (blue) to 373.15K (red)
+// 280K = green-blue, 288-318K = green to yellow, 373.15K = red
+vec3 thermal_color(float temp_k) {
+    // Logarithmic mapping: t = log(T - 273.15 + 1) / log(100 + 1)
+    float offset = max(temp_k - 273.15, 0.0);
+    float t = log(offset + 1.0) / log(101.0);
+    t = clamp(t, 0.0, 1.0);
     
-    vec3 rgb;
-    if (hue < 1.0) rgb = vec3(1.0, x, 0.0);
-    else if (hue < 2.0) rgb = vec3(x, 1.0, 0.0);
-    else if (hue < 3.0) rgb = vec3(0.0, 1.0, x);
-    else if (hue < 4.0) rgb = vec3(0.0, x, 1.0);
-    else if (hue < 5.0) rgb = vec3(x, 0.0, 1.0);
-    else rgb = vec3(1.0, 0.0, x);
-    
-    return rgb;
-}
-
-// Hash function to generate distinct color from species index
-// Ensures color is visually distinct from water color
-vec3 species_color(uint species_idx) {
-    // Use golden ratio based hash for good color distribution
-    float h = fract(float(species_idx) * 0.618033988749895);
-    
-    // If too close to water color, apply offsets until distinct
-    uint offset_idx = species_idx;
-    for (int i = 0; i < 8 && is_near_water_hue(h); i++) {
-        h = fract(h + HUE_OFFSETS[offset_idx & 7u]);
-        offset_idx++;
+    // Multi-stop color ramp:
+    // t=0.0 (273.15K freezing) -> deep blue
+    // t~0.15 (280K) -> green-blue/cyan
+    // t~0.30 (288K) -> green
+    // t~0.65 (318K) -> yellow
+    // t=1.0 (373.15K boiling) -> red
+    vec3 color;
+    if (t < 0.15) {
+        // Blue to cyan
+        float f = t / 0.15;
+        color = mix(vec3(0.1, 0.15, 0.9), vec3(0.1, 0.7, 0.8), f);
+    } else if (t < 0.30) {
+        // Cyan to green
+        float f = (t - 0.15) / 0.15;
+        color = mix(vec3(0.1, 0.7, 0.8), vec3(0.2, 0.85, 0.2), f);
+    } else if (t < 0.65) {
+        // Green to yellow
+        float f = (t - 0.30) / 0.35;
+        color = mix(vec3(0.2, 0.85, 0.2), vec3(0.95, 0.9, 0.15), f);
+    } else {
+        // Yellow to red
+        float f = (t - 0.65) / 0.35;
+        color = mix(vec3(0.95, 0.9, 0.15), vec3(0.95, 0.1, 0.1), f);
     }
-    
-    vec3 rgb = hue_to_rgb(h);
-    
-    // Slightly desaturate for better aesthetics
-    return mix(vec3(0.5), rgb, 0.85);
+    return color;
 }
 
 void main() {
@@ -118,6 +112,13 @@ void main() {
         return;
     }
     
+    // Thermal view mode: show temperature color ramp for all cells
+    if (thermal_view != 0) {
+        float temp = temperatures[cell_index];
+        outColor = vec4(thermal_color(temp), 1.0);
+        return;
+    }
+    
     // Check if solid
     if (solid_mask[cell_index] != 0) {
         uint mat_id = material_ids[cell_index];
@@ -140,7 +141,7 @@ void main() {
             // Weight is directly the concentration (molar)
             // Clamp to reasonable range for visualization
             float weight = min(conc, 2.0);
-            species_blend += species_color(s) * weight;
+            species_blend += species_colors[s].rgb * weight;
             total_conc += weight;
         }
     }

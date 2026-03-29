@@ -20,6 +20,8 @@ pub struct Scenario {
     pub solid_geometry: SolidGeometry,
     /// Initial concentrations per cell. Sparse - only non-zero cells stored.
     pub initial_concentrations: AHashMap<usize, SpeciesConcentrations>,
+    /// Initial temperature per cell in Kelvin. Dense array, one f32 per cell.
+    pub initial_temperatures: Vec<f32>,
 }
 
 impl Scenario {
@@ -56,6 +58,11 @@ impl Scenario {
     pub fn compile_material_ids(&self) -> Vec<u32> {
         self.solid_geometry.material_ids.iter().map(|m| m.0).collect()
     }
+
+    /// Compile temperatures to dense array (already dense, just clone).
+    pub fn compile_temperatures(&self) -> Vec<f32> {
+        self.initial_temperatures.clone()
+    }
 }
 
 /// Builder for creating scenarios with a fluent API.
@@ -65,6 +72,7 @@ pub struct ScenarioBuilder {
     material_registry: MaterialRegistry,
     solid_geometry: SolidGeometry,
     initial_concentrations: AHashMap<usize, SpeciesConcentrations>,
+    initial_temperatures: Vec<f32>,
 }
 
 impl ScenarioBuilder {
@@ -77,6 +85,7 @@ impl ScenarioBuilder {
             material_registry: MaterialRegistry::new(),
             solid_geometry: SolidGeometry::new(grid.cell_count()),
             initial_concentrations: AHashMap::new(),
+            initial_temperatures: Vec::new(),
         }
     }
 
@@ -161,14 +170,42 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Set temperature for all cells to a uniform value.
+    pub fn fill_temperature(mut self, temperature: f32) -> Self {
+        let cell_count = self.grid.cell_count();
+        self.initial_temperatures = vec![temperature; cell_count];
+        self
+    }
+
+    /// Set temperature for a rectangular region.
+    pub fn fill_temperature_rect(
+        mut self,
+        x0: u32, y0: u32,
+        x1: u32, y1: u32,
+        temperature: f32,
+    ) -> Self {
+        for coord in self.grid.iter_rect(x0, y0, x1, y1) {
+            let index = self.grid.index_of(coord);
+            self.initial_temperatures[index] = temperature;
+        }
+        self
+    }
+
     /// Build the final scenario.
     pub fn build(self) -> Scenario {
+        let cell_count = self.grid.cell_count();
+        let temperatures = if self.initial_temperatures.is_empty() {
+            vec![293.15; cell_count] // Default 20°C
+        } else {
+            self.initial_temperatures
+        };
         Scenario {
             grid: self.grid,
             species_registry: self.species_registry,
             material_registry: self.material_registry,
             solid_geometry: self.solid_geometry,
             initial_concentrations: self.initial_concentrations,
+            initial_temperatures: temperatures,
         }
     }
 }
@@ -205,7 +242,14 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
     
     // Create the hollow titanium square
-    let mut builder = builder.fill_hollow_rect(outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium);
+    let builder = builder.fill_hollow_rect(outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium);
+    
+    // Initialize temperatures:
+    // - Outside box water: 280.0K
+    // - Titanium walls: 280.0K
+    // - Top-left inside box: 318.15K
+    // - Bottom-right inside box: 288.0K
+    let mut builder = builder.fill_temperature(280.0); // Default: outside water + titanium at 280K
     
     // Inside the hollow square, split diagonally:
     // - Top left (above diagonal from top-right to bottom-left): 1.0 M Na+, 1.0 M Cl-
@@ -242,6 +286,8 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
                     .entry(index)
                     .or_default()
                     .set(cl_id, 1.0);
+                // Top-left temperature: 318.15K
+                builder.initial_temperatures[index] = 318.15;
             } else {
                 // Bottom-right: K+ and Cl-
                 builder.initial_concentrations
@@ -252,6 +298,8 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
                     .entry(index)
                     .or_default()
                     .set(cl_id, 1.0);
+                // Bottom-right temperature: 288.0K
+                builder.initial_temperatures[index] = 288.0;
             }
         }
     }

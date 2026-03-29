@@ -18,6 +18,7 @@ pub struct VisualizationPushConstants {
     pub height: u32,
     pub species_count: u32,
     pub frame_counter: u32,  // For debug visualization
+    pub thermal_view: u32,   // 1 = show thermal view, 0 = normal
 }
 
 /// A GPU buffer for the render pipeline.
@@ -81,6 +82,8 @@ pub struct RenderPipeline {
     pub concentration_buffer: RenderBuffer,
     pub solid_mask_buffer: RenderBuffer,
     pub material_id_buffer: RenderBuffer,
+    pub species_color_buffer: RenderBuffer,
+    pub temperature_buffer: RenderBuffer,
 
     // Staging buffer
     pub staging_buffer: RenderBuffer,
@@ -96,7 +99,7 @@ pub struct RenderPipeline {
 }
 
 impl RenderPipeline {
-    pub fn new(ctx: &RenderContext, grid_width: u32, grid_height: u32, species_count: usize) -> Result<Self> {
+    pub fn new(ctx: &RenderContext, grid_width: u32, grid_height: u32, species_count: usize, species_colors: &[[f32; 4]]) -> Result<Self> {
         let cell_count = (grid_width * grid_height) as usize;
         
         // Buffer sizes
@@ -133,10 +136,34 @@ impl RenderPipeline {
             "render_material_ids",
         )?;
 
+        // Species color buffer: vec4 per species (RGB + padding), uploaded once
+        let color_size = (species_count.max(1) * std::mem::size_of::<[f32; 4]>()) as u64;
+        let mut species_color_buffer = RenderBuffer::new(
+            &ctx.device,
+            &mut alloc,
+            color_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::CpuToGpu,
+            "render_species_colors",
+        )?;
+        let flat_colors: &[f32] = bytemuck::cast_slice(species_colors);
+        species_color_buffer.write(flat_colors)?;
+
+        // Temperature buffer: one f32 per cell
+        let temp_size = (cell_count * std::mem::size_of::<f32>()) as u64;
+        let temperature_buffer = RenderBuffer::new(
+            &ctx.device,
+            &mut alloc,
+            temp_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuOnly,
+            "render_temperatures",
+        )?;
+
         let staging_buffer = RenderBuffer::new(
             &ctx.device,
             &mut alloc,
-            conc_size.max(mask_size),
+            conc_size.max(mask_size).max(temp_size),
             vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::CpuToGpu,
             "render_staging",
@@ -158,6 +185,16 @@ impl RenderPipeline {
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -284,7 +321,7 @@ impl RenderPipeline {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(3),
+                .descriptor_count(5),
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -310,6 +347,14 @@ impl RenderPipeline {
             .buffer(material_id_buffer.buffer)
             .offset(0)
             .range(mask_size)];
+        let color_info = [vk::DescriptorBufferInfo::default()
+            .buffer(species_color_buffer.buffer)
+            .offset(0)
+            .range(color_size)];
+        let temp_info = [vk::DescriptorBufferInfo::default()
+            .buffer(temperature_buffer.buffer)
+            .offset(0)
+            .range(temp_size)];
 
         let writes = [
             vk::WriteDescriptorSet::default()
@@ -327,6 +372,16 @@ impl RenderPipeline {
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(&mat_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&color_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&temp_info),
         ];
 
         unsafe { ctx.device.update_descriptor_sets(&writes, &[]) };
@@ -340,6 +395,8 @@ impl RenderPipeline {
             concentration_buffer,
             solid_mask_buffer,
             material_id_buffer,
+            species_color_buffer,
+            temperature_buffer,
             staging_buffer,
             grid_width,
             grid_height,
@@ -382,11 +439,16 @@ impl RenderPipeline {
         self.staging_buffer.write(&state.material_ids)?;
         copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.material_id_buffer.buffer, mask_size)?;
 
+        // Upload temperatures with barrier
+        let temp_size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
+        self.staging_buffer.write(&state.temperatures)?;
+        copy_buffer_with_barrier(ctx, self.staging_buffer.buffer, self.temperature_buffer.buffer, temp_size)?;
+
         Ok(())
     }
 
     /// Record rendering commands.
-    pub fn record(&mut self, ctx: &RenderContext, cmd: vk::CommandBuffer, image_index: usize) {
+    pub fn record(&mut self, ctx: &RenderContext, cmd: vk::CommandBuffer, image_index: usize, thermal_view: bool) {
         // Increment frame counter
         self.frame_counter = self.frame_counter.wrapping_add(1);
         
@@ -424,6 +486,7 @@ impl RenderPipeline {
             height: self.grid_height,
             species_count: self.species_count as u32,
             frame_counter: self.frame_counter,
+            thermal_view: if thermal_view { 1 } else { 0 },
         };
 
         unsafe {
@@ -476,6 +539,12 @@ impl RenderPipeline {
 
             ctx.device.destroy_buffer(self.material_id_buffer.buffer, None);
             alloc.free(std::mem::take(&mut self.material_id_buffer.allocation)).ok();
+
+            ctx.device.destroy_buffer(self.species_color_buffer.buffer, None);
+            alloc.free(std::mem::take(&mut self.species_color_buffer.allocation)).ok();
+
+            ctx.device.destroy_buffer(self.temperature_buffer.buffer, None);
+            alloc.free(std::mem::take(&mut self.temperature_buffer.allocation)).ok();
 
             ctx.device.destroy_buffer(self.staging_buffer.buffer, None);
             alloc.free(std::mem::take(&mut self.staging_buffer.allocation)).ok();

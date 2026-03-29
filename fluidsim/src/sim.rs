@@ -57,6 +57,8 @@ pub struct RenderState {
     pub solid_mask: Vec<u32>,
     /// Material IDs
     pub material_ids: Vec<u32>,
+    /// Temperature per cell in Kelvin
+    pub temperatures: Vec<f32>,
 }
 
 /// The main simulation state.
@@ -81,6 +83,8 @@ pub struct Simulation {
     cached_solid_mask: Option<Vec<u32>>,
     /// Cached material IDs
     cached_material_ids: Option<Vec<u32>>,
+    /// Cached temperatures
+    cached_temperatures: Option<Vec<f32>>,
     /// Whether cached data needs refresh
     cache_dirty: bool,
     /// Simulation time accumulator
@@ -97,6 +101,7 @@ impl Simulation {
         let concentrations = scenario.compile_concentrations();
         let solid_mask = scenario.compile_solid_mask();
         let material_ids = scenario.compile_material_ids();
+        let temperatures = scenario.compile_temperatures();
         let diffusion_coeffs = scenario.species_registry.diffusion_coefficients();
 
         let gpu = GpuSimulation::new(
@@ -120,6 +125,7 @@ impl Simulation {
             cached_concentrations: None,
             cached_solid_mask: None,
             cached_material_ids: None,
+            cached_temperatures: Some(temperatures),
             cache_dirty: true,
             time: 0.0,
             step_count: 0,
@@ -235,6 +241,8 @@ impl Simulation {
             .unwrap_or_else(|| vec![0; (self.grid.width * self.grid.height) as usize]);
         let material_ids = self.cached_material_ids.clone()
             .unwrap_or_else(|| vec![0; (self.grid.width * self.grid.height) as usize]);
+        let temperatures = self.cached_temperatures.clone()
+            .unwrap_or_else(|| vec![293.15; (self.grid.width * self.grid.height) as usize]);
 
         Ok(RenderState {
             width: self.grid.width,
@@ -243,6 +251,7 @@ impl Simulation {
             concentrations,
             solid_mask,
             material_ids,
+            temperatures,
         })
     }
 

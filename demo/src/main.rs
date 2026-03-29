@@ -41,6 +41,9 @@ struct DemoApp {
     tooltip_text: String,
     species_names: Vec<String>,  // Cached species names for tooltip display
     
+    // Thermal view (momentary display while T is held)
+    thermal_view: bool,
+    
     // Timing
     last_frame: Instant,
     frame_count: u64,
@@ -65,6 +68,7 @@ impl DemoApp {
             show_tooltip: false,
             tooltip_text: String::new(),
             species_names: Vec::new(),
+            thermal_view: false,
             last_frame: Instant::now(),
             frame_count: 0,
             fps_update_time: Instant::now(),
@@ -97,12 +101,15 @@ impl DemoApp {
         log::info!("Render context created successfully");
         
         log::info!("Creating render pipeline...");
+        // Compute species colors: explicit overrides, then hash-based fallback
+        let species_colors = compute_species_colors(simulation.species_registry());
         // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &render_ctx,
             simulation.dimensions().0,
             simulation.dimensions().1,
             simulation.species_registry().count(),
+            &species_colors,
         )?;
         log::info!("Render pipeline created successfully");
         
@@ -282,7 +289,7 @@ impl DemoApp {
         }
         
         // Record fluid visualization (keeps render pass open)
-        pipeline.record(ctx, cmd, image_index as usize);
+        pipeline.record(ctx, cmd, image_index as usize, self.thermal_view);
         
         // Record egui draw commands inside the same render pass
         egui.cmd_draw(ctx, cmd, ctx.swapchain_extent)?;
@@ -398,6 +405,18 @@ impl ApplicationHandler for DemoApp {
                             sim.set_inspection_mip(self.inspection_mip);
                         }
                         log::info!("Inspection mip: {}", self.inspection_mip);
+                    }
+                    Key::Character(ref c) if c == "t" || c == "T" => {
+                        self.thermal_view = true;
+                    }
+                    _ => {}
+                }
+            }
+            
+            WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Released, .. }, .. } => {
+                match logical_key {
+                    Key::Character(ref c) if c == "t" || c == "T" => {
+                        self.thermal_view = false;
                     }
                     _ => {}
                 }
@@ -549,6 +568,53 @@ impl Drop for DemoApp {
         // Now it's safe to drop the render_ctx and other resources
         log::info!("DemoApp::drop - cleanup complete, dropping remaining fields");
     }
+}
+
+/// Compute species colors: explicit overrides for known species, hash-based fallback.
+fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]> {
+    use std::collections::HashMap;
+
+    // Explicit color assignments for known species (RGB, visually distinct from water blue)
+    let overrides: HashMap<&str, [f32; 3]> = HashMap::from([
+        ("Na+", [0.95, 0.3, 0.2]),   // Red-orange
+        ("K+",  [0.2, 0.85, 0.3]),   // Green
+        ("Cl-", [0.85, 0.7, 0.2]),   // Gold/yellow
+        ("H+",  [1.0, 0.4, 0.7]),    // Pink
+        ("OH-", [0.6, 0.2, 0.9]),    // Purple
+        ("Ca2+",[0.9, 0.6, 0.1]),    // Orange
+    ]);
+
+    registry.iter().map(|info| {
+        if let Some(&rgb) = overrides.get(info.name.as_ref()) {
+            [rgb[0], rgb[1], rgb[2], 1.0]
+        } else {
+            // Hash-based fallback: golden ratio distribution, avoid water-blue hue
+            let mut h = (info.index as f32 * 0.618033988749895).fract();
+            for _ in 0..8 {
+                let dist = (h - 0.54).abs().min(1.0 - (h - 0.54).abs());
+                if dist >= 0.12 { break; }
+                h = (h + 0.17).fract();
+            }
+            let rgb = hue_to_rgb(h);
+            // Slightly desaturate
+            let r = 0.5 + (rgb[0] - 0.5) * 0.85;
+            let g = 0.5 + (rgb[1] - 0.5) * 0.85;
+            let b = 0.5 + (rgb[2] - 0.5) * 0.85;
+            [r, g, b, 1.0]
+        }
+    }).collect()
+}
+
+/// Convert hue (0..1) to RGB.
+fn hue_to_rgb(h: f32) -> [f32; 3] {
+    let hue = h * 6.0;
+    let x = 1.0 - (hue % 2.0 - 1.0).abs();
+    if hue < 1.0 { [1.0, x, 0.0] }
+    else if hue < 2.0 { [x, 1.0, 0.0] }
+    else if hue < 3.0 { [0.0, 1.0, x] }
+    else if hue < 4.0 { [0.0, x, 1.0] }
+    else if hue < 5.0 { [x, 0.0, 1.0] }
+    else { [1.0, 0.0, x] }
 }
 
 fn main() -> Result<()> {
