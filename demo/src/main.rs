@@ -49,10 +49,11 @@ struct DemoApp {
     
     // Flags
     needs_resize: bool,
+    smoke_test: bool,
 }
 
 impl DemoApp {
-    fn new() -> Self {
+    fn new(smoke_test: bool) -> Self {
         Self {
             window: None,
             render_ctx: None,
@@ -69,6 +70,7 @@ impl DemoApp {
             fps_update_time: Instant::now(),
             current_fps: 0.0,
             needs_resize: false,
+            smoke_test,
         }
     }
 
@@ -499,6 +501,13 @@ impl ApplicationHandler for DemoApp {
                     self.fps_update_time = frame_start;
                 }
                 
+                // Exit after 5 frames in smoke-test mode
+                if self.smoke_test && self.frame_count >= 5 {
+                    log::info!("Smoke test: 5 frames rendered, exiting");
+                    event_loop.exit();
+                    return;
+                }
+
                 // Request next frame
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -547,10 +556,15 @@ fn main() -> Result<()> {
     log::info!("  +/-: Adjust inspection mip");
     log::info!("  Escape: Exit");
     
+    let smoke_test = std::env::args().any(|a| a == "--smoke-test");
+    if smoke_test {
+        log::info!("Running in smoke-test mode (5 frames then exit)");
+    }
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     
-    let mut app = DemoApp::new();
+    let mut app = DemoApp::new(smoke_test);
     event_loop.run_app(&mut app)?;
     
     Ok(())

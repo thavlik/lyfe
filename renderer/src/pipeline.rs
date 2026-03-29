@@ -104,7 +104,7 @@ impl RenderPipeline {
         let mask_size = (cell_count * std::mem::size_of::<u32>()) as u64;
 
         // Create buffers
-        let mut alloc = ctx.allocator.lock();
+        let mut alloc = ctx.allocator.as_ref().unwrap().lock();
 
         let concentration_buffer = RenderBuffer::new(
             &ctx.device,
@@ -466,7 +466,7 @@ impl RenderPipeline {
             ctx.device.destroy_descriptor_pool(self.descriptor_pool, None);
             ctx.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 
-            let mut alloc = ctx.allocator.lock();
+            let mut alloc = ctx.allocator.as_ref().unwrap().lock();
 
             ctx.device.destroy_buffer(self.concentration_buffer.buffer, None);
             alloc.free(std::mem::take(&mut self.concentration_buffer.allocation)).ok();

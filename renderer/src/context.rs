@@ -20,7 +20,7 @@ pub struct RenderContext {
     pub device: ash::Device,
     pub graphics_queue: vk::Queue,
     pub graphics_queue_family: u32,
-    pub allocator: Arc<Mutex<Allocator>>,
+    pub allocator: Option<Arc<Mutex<Allocator>>>,
 
     // Swapchain
     pub swapchain_loader: ash::khr::swapchain::Device,
@@ -314,7 +314,7 @@ impl RenderContext {
             device,
             graphics_queue,
             graphics_queue_family,
-            allocator,
+            allocator: Some(allocator),
             swapchain_loader,
             swapchain,
             swapchain_images,
@@ -528,6 +528,11 @@ impl Drop for RenderContext {
             self.device.destroy_render_pass(self.render_pass, None);
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
+
+            // Drop the allocator BEFORE destroying the device.
+            // gpu_allocator::Allocator::drop calls vkFreeMemory, which requires a live device.
+            drop(self.allocator.take());
+
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }

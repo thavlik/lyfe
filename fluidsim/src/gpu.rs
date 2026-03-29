@@ -115,7 +115,7 @@ pub struct GpuSimulation {
     pub compute_queue_family: u32,
 
     // Memory allocator
-    pub allocator: Arc<Mutex<Allocator>>,
+    pub allocator: Option<Arc<Mutex<Allocator>>>,
 
     // Grid dimensions
     pub width: u32,
@@ -525,7 +525,7 @@ impl GpuSimulation {
             device,
             compute_queue,
             compute_queue_family,
-            allocator,
+            allocator: Some(allocator),
             width,
             height,
             cell_count,
@@ -842,7 +842,7 @@ impl Drop for GpuSimulation {
             self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 
             // Buffers and allocations
-            let mut alloc = self.allocator.lock();
+            let mut alloc = self.allocator.as_ref().unwrap().lock();
             
             self.device.destroy_buffer(self.conc_buffer_a.buffer, None);
             alloc.free(std::mem::take(&mut self.conc_buffer_a.allocation)).ok();
@@ -866,6 +866,10 @@ impl Drop for GpuSimulation {
             alloc.free(std::mem::take(&mut self.readback_buffer.allocation)).ok();
             
             drop(alloc);
+
+            // Drop the allocator BEFORE destroying the device.
+            // gpu_allocator::Allocator::drop calls vkFreeMemory, which requires a live device.
+            drop(self.allocator.take());
 
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
