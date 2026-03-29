@@ -41,6 +41,11 @@ layout(set = 0, binding = 3) readonly buffer DiffusionCoeffs {
     float diffusion_coeffs[];
 };
 
+// Binding 4: Integer ionic charge / valence per species
+layout(set = 0, binding = 4) readonly buffer SpeciesCharges {
+    int species_charges[];
+};
+
 void main() {
     uint cell_index = gl_GlobalInvocationID.x;
     uint species_idx = gl_WorkGroupID.y;
@@ -68,6 +73,11 @@ void main() {
     
     // Get diffusion coefficient for this species
     float D = diffusion_coeffs[species_idx] * diffusion_rate;
+    int z = species_charges[species_idx];
+    float charge_mobility_scale = (z == 0)
+        ? 1.0
+        : (1.0 / max(float(abs(z)), 1.0));
+    D *= charge_mobility_scale;
     
     // Accumulate flux from neighbors (4-connected)
     float flux = 0.0;

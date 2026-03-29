@@ -597,6 +597,11 @@ impl GpuSimulation {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -715,7 +720,7 @@ impl GpuSimulation {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(8),
+                .descriptor_count(10),
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -752,9 +757,11 @@ impl GpuSimulation {
             conc_buffer_b.buffer,
             solid_mask.buffer,
             diffusion_coeffs.buffer,
+            species_charges.buffer,
             conc_buffer_size,
             mask_buffer_size,
             coeffs_buffer_size,
+            charges_buffer_size,
         );
 
         Self::update_descriptor_set(
@@ -764,9 +771,11 @@ impl GpuSimulation {
             conc_buffer_a.buffer,
             solid_mask.buffer,
             diffusion_coeffs.buffer,
+            species_charges.buffer,
             conc_buffer_size,
             mask_buffer_size,
             coeffs_buffer_size,
+            charges_buffer_size,
         );
 
         Self::update_charge_descriptor_set(
@@ -955,9 +964,11 @@ impl GpuSimulation {
         dst_buffer: vk::Buffer,
         mask_buffer: vk::Buffer,
         coeffs_buffer: vk::Buffer,
+        charges_buffer: vk::Buffer,
         conc_size: u64,
         mask_size: u64,
         coeffs_size: u64,
+        charges_size: u64,
     ) {
         let src_info = [vk::DescriptorBufferInfo::default()
             .buffer(src_buffer)
@@ -975,6 +986,10 @@ impl GpuSimulation {
             .buffer(coeffs_buffer)
             .offset(0)
             .range(coeffs_size)];
+        let charges_info = [vk::DescriptorBufferInfo::default()
+            .buffer(charges_buffer)
+            .offset(0)
+            .range(charges_size)];
 
         let writes = [
             vk::WriteDescriptorSet::default()
@@ -997,6 +1012,11 @@ impl GpuSimulation {
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(&coeffs_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&charges_info),
         ];
 
         unsafe { device.update_descriptor_sets(&writes, &[]) };
