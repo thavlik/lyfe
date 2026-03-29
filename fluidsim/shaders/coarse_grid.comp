@@ -31,14 +31,24 @@ layout(set = 0, binding = 1) readonly buffer SolidMask {
     uint solid_mask[];
 };
 
-// Binding 2: Coarse concentrations (write) - [species][coarse_cell]
-layout(set = 0, binding = 2) writeonly buffer CoarseConcentrations {
+// Binding 2: Full-resolution temperatures (read)
+layout(set = 0, binding = 2) readonly buffer FullTemperatures {
+    float full_temperatures[];
+};
+
+// Binding 3: Coarse concentrations (write) - [species][coarse_cell]
+layout(set = 0, binding = 3) writeonly buffer CoarseConcentrations {
     float coarse_conc[];
 };
 
-// Binding 3: Coarse fluid counts (write) - number of fluid cells per coarse cell
-layout(set = 0, binding = 3) writeonly buffer CoarseFluidCounts {
+// Binding 4: Coarse fluid counts (write) - number of fluid cells per coarse cell
+layout(set = 0, binding = 4) writeonly buffer CoarseFluidCounts {
     uint coarse_fluid_count[];
+};
+
+// Binding 5: Coarse mean temperatures (write)
+layout(set = 0, binding = 5) writeonly buffer CoarseTemperatures {
+    float coarse_temperature[];
 };
 
 void main() {
@@ -63,6 +73,7 @@ void main() {
     
     // Accumulate concentrations over the NxN block
     float sum = 0.0;
+    float temperature_sum = 0.0;
     uint fluid_count = 0;
     
     for (uint y = start_y; y < end_y; y++) {
@@ -73,6 +84,9 @@ void main() {
             if (solid_mask[full_idx] == 0) {
                 sum += full_conc[species_idx * full_cell_count + full_idx];
                 fluid_count++;
+                if (species_idx == 0) {
+                    temperature_sum += full_temperatures[full_idx];
+                }
             }
         }
     }
@@ -84,5 +98,8 @@ void main() {
     // Only write fluid count once (from species 0)
     if (species_idx == 0) {
         coarse_fluid_count[coarse_idx] = fluid_count;
+        coarse_temperature[coarse_idx] = (fluid_count > 0)
+            ? (temperature_sum / float(fluid_count))
+            : 293.15;
     }
 }

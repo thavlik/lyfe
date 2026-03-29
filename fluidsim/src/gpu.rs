@@ -791,21 +791,7 @@ impl GpuSimulation {
             charges_buffer_size,
         );
 
-        let coarse_grid = CoarseGrid::new(
-            device.clone(),
-            compute_queue,
-            compute_queue_family,
-            allocator.clone(),
-            width,
-            height,
-            species_count,
-            8,
-            conc_buffer_a.buffer,
-            conc_buffer_b.buffer,
-            solid_mask.buffer,
-            conc_buffer_size,
-            mask_buffer_size,
-        ).ok();
+        let coarse_grid = None;
 
         Ok(Self {
             entry,
@@ -1427,10 +1413,6 @@ impl GpuSimulation {
             };
             self.record_compute_buffer_barrier(cmd, next_concentration_buffer);
 
-            if let Some(ref coarse) = self.coarse_grid {
-                coarse.record_compute(cmd, next_buffer);
-            }
-
             self.current_buffer = next_buffer;
 
             let charge_descriptor_set = self.charge_descriptor_sets[self.current_buffer];
@@ -1489,6 +1471,10 @@ impl GpuSimulation {
                 cmd,
                 Self::temperature_buffer_handle(rxn, temperature_current_buffer),
             );
+        }
+
+        if let Some(ref coarse) = self.coarse_grid {
+            coarse.record_compute(cmd, self.current_buffer, temperature_current_buffer);
         }
 
         if let Some(rxn) = self.reaction.as_mut() {
@@ -1613,10 +1599,11 @@ impl GpuSimulation {
             // After diffusion: if current_buffer == 0, we wrote to B and will swap to 1 (B becomes current)
             // So coarse grid should read from the buffer that will be current after swap
             if let Some(ref coarse) = self.coarse_grid {
-                // After this step completes, current_buffer will have been swapped
-                // So coarse should read from 1 - current_buffer (the destination of diffusion)
                 let next_buffer = 1 - self.current_buffer;
-                coarse.record_compute(self.command_buffer, next_buffer);
+                let temperature_current_buffer = self.reaction.as_ref()
+                    .map(|rxn| rxn.temperature_current_buffer)
+                    .unwrap_or(0);
+                coarse.record_compute(self.command_buffer, next_buffer, temperature_current_buffer);
             }
 
             self.device.end_command_buffer(self.command_buffer)?;
@@ -2191,6 +2178,25 @@ impl GpuSimulation {
             active_rule_count: 0,
             rule_set_hash: 0,
         });
+
+        self.coarse_grid = CoarseGrid::new(
+            self.device.clone(),
+            self.compute_queue,
+            self.compute_queue_family,
+            self.allocator.as_ref().expect("allocator should exist").clone(),
+            self.width,
+            self.height,
+            self.species_count,
+            8,
+            self.conc_buffer_a.buffer,
+            self.conc_buffer_b.buffer,
+            self.reaction.as_ref().expect("reaction initialized").temperature_buffer_a.buffer,
+            self.reaction.as_ref().expect("reaction initialized").temperature_buffer_b.buffer,
+            self.solid_mask.buffer,
+            (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64,
+            (self.cell_count * std::mem::size_of::<f32>()) as u64,
+            (self.cell_count * std::mem::size_of::<u32>()) as u64,
+        ).ok();
 
         log::info!("Reaction pipeline initialized");
         Ok(())

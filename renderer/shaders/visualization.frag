@@ -51,37 +51,39 @@ const vec3 WATER_COLOR = vec3(0.7, 0.85, 0.95);
 // Solid titanium color
 const vec3 TITANIUM_COLOR = vec3(0.6, 0.6, 0.65);
 
-// Thermal color ramp: logarithmic scale from 273.15K (blue) to 373.15K (red)
-// 280K = green-blue, 288-318K = green to yellow, 373.15K = red
+// Thermal color ramp: shifted down so cryogenic temperatures still span
+// the warm half of the palette. 185K should already read as yellow-ish,
+// while 278.15K sits well into the hot end.
 vec3 thermal_color(float temp_k) {
-    // Logarithmic mapping: t = log(T - 273.15 + 1) / log(100 + 1)
-    float offset = max(temp_k - 273.15, 0.0);
-    float t = log(offset + 1.0) / log(101.0);
+    const float min_temp_k = 120.0;
+    const float max_temp_k = 320.0;
+    float normalized = clamp((temp_k - min_temp_k) / (max_temp_k - min_temp_k), 0.0, 1.0);
+    float t = pow(normalized, 0.82);
     t = clamp(t, 0.0, 1.0);
     
     // Multi-stop color ramp:
-    // t=0.0 (273.15K freezing) -> deep blue
-    // t~0.15 (280K) -> green-blue/cyan
-    // t~0.30 (288K) -> green
-    // t~0.65 (318K) -> yellow
-    // t=1.0 (373.15K boiling) -> red
+    // t=0.0 (~120K) -> deep blue
+    // t~0.18 (~150K) -> cyan
+    // t~0.34 (~185K) -> yellow-green / early yellow
+    // t~0.58 (~235K) -> yellow
+    // t=1.0 (~320K+) -> red
     vec3 color;
-    if (t < 0.15) {
+    if (t < 0.18) {
         // Blue to cyan
-        float f = t / 0.15;
+        float f = t / 0.18;
         color = mix(vec3(0.1, 0.15, 0.9), vec3(0.1, 0.7, 0.8), f);
-    } else if (t < 0.30) {
-        // Cyan to green
-        float f = (t - 0.15) / 0.15;
-        color = mix(vec3(0.1, 0.7, 0.8), vec3(0.2, 0.85, 0.2), f);
-    } else if (t < 0.65) {
-        // Green to yellow
-        float f = (t - 0.30) / 0.35;
-        color = mix(vec3(0.2, 0.85, 0.2), vec3(0.95, 0.9, 0.15), f);
+    } else if (t < 0.34) {
+        // Cyan to yellow-green
+        float f = (t - 0.18) / 0.16;
+        color = mix(vec3(0.1, 0.7, 0.8), vec3(0.82, 0.88, 0.2), f);
+    } else if (t < 0.58) {
+        // Yellow-green to yellow
+        float f = (t - 0.34) / 0.24;
+        color = mix(vec3(0.82, 0.88, 0.2), vec3(0.97, 0.83, 0.12), f);
     } else {
         // Yellow to red
-        float f = (t - 0.65) / 0.35;
-        color = mix(vec3(0.95, 0.9, 0.15), vec3(0.95, 0.1, 0.1), f);
+        float f = (t - 0.58) / 0.42;
+        color = mix(vec3(0.97, 0.83, 0.12), vec3(0.95, 0.1, 0.1), f);
     }
     return color;
 }

@@ -34,6 +34,8 @@ pub struct CoarsePushConstants {
 struct ReadbackCell {
     /// Species concentrations for this cell
     concentrations: Vec<f32>,
+    /// Mean temperature for this cell in Kelvin
+    mean_temperature_kelvin: f32,
     /// Number of fluid cells in this coarse cell
     fluid_count: u32,
     /// Number of solid cells
@@ -54,8 +56,6 @@ enum ReadbackState {
         target_coord: (u32, u32),
         submit_time: Instant,
     },
-    /// Readback complete, data available
-    Ready(ReadbackCell),
 }
 
 /// Coarse grid computation and async readback system.
@@ -75,6 +75,7 @@ pub struct CoarseGrid {
     // GPU buffers for coarse grid
     coarse_conc_buffer: CoarseBuffer,
     coarse_fluid_count_buffer: CoarseBuffer,
+    coarse_temperature_buffer: CoarseBuffer,
     
     // Small readback buffer (just one coarse cell worth of data)
     cell_readback_buffer: CoarseBuffer,
@@ -107,7 +108,6 @@ pub struct CoarseGrid {
 struct CoarseBuffer {
     buffer: vk::Buffer,
     allocation: Allocation,
-    size: u64,
 }
 
 impl CoarseBuffer {
@@ -139,7 +139,7 @@ impl CoarseBuffer {
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
         }
 
-        Ok(Self { buffer, allocation, size })
+        Ok(Self { buffer, allocation })
     }
 
     fn read<T: Pod + Clone>(&self, count: usize) -> Result<Vec<T>> {
@@ -155,6 +155,8 @@ impl CoarseBuffer {
 pub struct CoarseCellData {
     /// Average concentrations per species
     pub concentrations: Vec<f32>,
+    /// Average temperature across fluid cells in Kelvin
+    pub mean_temperature_kelvin: f32,
     /// Number of fluid cells in this coarse cell
     pub fluid_count: u32,
     /// Number of solid cells
@@ -178,8 +180,11 @@ impl CoarseGrid {
         mip_factor: u32,
         src_buffer_a: vk::Buffer,
         src_buffer_b: vk::Buffer,
+        temperature_buffer_a: vk::Buffer,
+        temperature_buffer_b: vk::Buffer,
         solid_mask_buffer: vk::Buffer,
         conc_buffer_size: u64,
+        temperature_buffer_size: u64,
         mask_buffer_size: u64,
     ) -> Result<Self> {
         let coarse_width = (full_width + mip_factor - 1) / mip_factor;
@@ -191,8 +196,9 @@ impl CoarseGrid {
         // Buffer sizes
         let coarse_conc_size = (species_count * coarse_cell_count * std::mem::size_of::<f32>()) as u64;
         let coarse_count_size = (coarse_cell_count * std::mem::size_of::<u32>()) as u64;
-        // Readback buffer: concentrations for one cell + fluid count
-        let cell_readback_size = ((species_count + 1) * std::mem::size_of::<f32>()) as u64;
+        let coarse_temperature_size = (coarse_cell_count * std::mem::size_of::<f32>()) as u64;
+        // Readback buffer: concentrations for one cell + fluid count + mean temperature
+        let cell_readback_size = ((species_count + 2) * std::mem::size_of::<f32>()) as u64;
         
         let mut alloc = allocator.lock();
         
@@ -213,6 +219,15 @@ impl CoarseGrid {
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::GpuOnly,
             "coarse_fluid_counts",
+        )?;
+
+        let coarse_temperature_buffer = CoarseBuffer::new(
+            &device,
+            &mut alloc,
+            coarse_temperature_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::GpuOnly,
+            "coarse_temperatures",
         )?;
         
         // Small readback buffer (CPU visible)
@@ -260,15 +275,27 @@ impl CoarseGrid {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 2: Coarse concentrations (write)
+            // Binding 2: Full temperatures (read)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 3: Coarse fluid counts (write)
+            // Binding 3: Coarse concentrations (write)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Binding 4: Coarse fluid counts (write)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Binding 5: Coarse temperatures (write)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
@@ -311,45 +338,92 @@ impl CoarseGrid {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(8), // 4 bindings * 2 sets
+                .descriptor_count(24), // 6 bindings * 4 sets
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(2)
+            .max_sets(4)
             .pool_sizes(&pool_sizes);
         let coarse_descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None)? };
 
-        let layouts = [coarse_descriptor_set_layout, coarse_descriptor_set_layout];
+        let layouts = [
+            coarse_descriptor_set_layout,
+            coarse_descriptor_set_layout,
+            coarse_descriptor_set_layout,
+            coarse_descriptor_set_layout,
+        ];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(coarse_descriptor_pool)
             .set_layouts(&layouts);
         let coarse_descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info)? };
         
-        // Update descriptor sets for both ping-pong buffers
+        // Update descriptor sets for concentration current buffer x temperature current buffer.
         Self::update_coarse_descriptor_set(
             &device,
             coarse_descriptor_sets[0],
             src_buffer_a,
+            temperature_buffer_a,
             solid_mask_buffer,
             coarse_conc_buffer.buffer,
             coarse_fluid_count_buffer.buffer,
+            coarse_temperature_buffer.buffer,
             conc_buffer_size,
+            temperature_buffer_size,
             mask_buffer_size,
             coarse_conc_size,
             coarse_count_size,
+            coarse_temperature_size,
         );
         
         Self::update_coarse_descriptor_set(
             &device,
             coarse_descriptor_sets[1],
-            src_buffer_b,
+            src_buffer_a,
+            temperature_buffer_b,
             solid_mask_buffer,
             coarse_conc_buffer.buffer,
             coarse_fluid_count_buffer.buffer,
+            coarse_temperature_buffer.buffer,
             conc_buffer_size,
+            temperature_buffer_size,
             mask_buffer_size,
             coarse_conc_size,
             coarse_count_size,
+            coarse_temperature_size,
+        );
+
+        Self::update_coarse_descriptor_set(
+            &device,
+            coarse_descriptor_sets[2],
+            src_buffer_b,
+            temperature_buffer_a,
+            solid_mask_buffer,
+            coarse_conc_buffer.buffer,
+            coarse_fluid_count_buffer.buffer,
+            coarse_temperature_buffer.buffer,
+            conc_buffer_size,
+            temperature_buffer_size,
+            mask_buffer_size,
+            coarse_conc_size,
+            coarse_count_size,
+            coarse_temperature_size,
+        );
+
+        Self::update_coarse_descriptor_set(
+            &device,
+            coarse_descriptor_sets[3],
+            src_buffer_b,
+            temperature_buffer_b,
+            solid_mask_buffer,
+            coarse_conc_buffer.buffer,
+            coarse_fluid_count_buffer.buffer,
+            coarse_temperature_buffer.buffer,
+            conc_buffer_size,
+            temperature_buffer_size,
+            mask_buffer_size,
+            coarse_conc_size,
+            coarse_count_size,
+            coarse_temperature_size,
         );
         
         // Create command pool and buffer for async readback
@@ -378,6 +452,7 @@ impl CoarseGrid {
             full_height,
             coarse_conc_buffer,
             coarse_fluid_count_buffer,
+            coarse_temperature_buffer,
             cell_readback_buffer,
             coarse_pipeline,
             coarse_pipeline_layout,
@@ -399,18 +474,26 @@ impl CoarseGrid {
         device: &ash::Device,
         set: vk::DescriptorSet,
         full_conc_buffer: vk::Buffer,
+        full_temperature_buffer: vk::Buffer,
         solid_mask_buffer: vk::Buffer,
         coarse_conc_buffer: vk::Buffer,
         coarse_count_buffer: vk::Buffer,
+        coarse_temperature_buffer: vk::Buffer,
         full_conc_size: u64,
+        full_temperature_size: u64,
         mask_size: u64,
         coarse_conc_size: u64,
         coarse_count_size: u64,
+        coarse_temperature_size: u64,
     ) {
         let full_conc_info = [vk::DescriptorBufferInfo::default()
             .buffer(full_conc_buffer)
             .offset(0)
             .range(full_conc_size)];
+        let full_temperature_info = [vk::DescriptorBufferInfo::default()
+            .buffer(full_temperature_buffer)
+            .offset(0)
+            .range(full_temperature_size)];
         let mask_info = [vk::DescriptorBufferInfo::default()
             .buffer(solid_mask_buffer)
             .offset(0)
@@ -423,6 +506,10 @@ impl CoarseGrid {
             .buffer(coarse_count_buffer)
             .offset(0)
             .range(coarse_count_size)];
+        let coarse_temperature_info = [vk::DescriptorBufferInfo::default()
+            .buffer(coarse_temperature_buffer)
+            .offset(0)
+            .range(coarse_temperature_size)];
 
         let writes = [
             vk::WriteDescriptorSet::default()
@@ -439,12 +526,22 @@ impl CoarseGrid {
                 .dst_set(set)
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&coarse_conc_info),
+                .buffer_info(&full_temperature_info),
             vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&coarse_conc_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(&coarse_count_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(5)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&coarse_temperature_info),
         ];
 
         unsafe { device.update_descriptor_sets(&writes, &[]) };
@@ -452,7 +549,7 @@ impl CoarseGrid {
     
     /// Record coarse grid computation commands into an existing command buffer.
     /// Should be called every frame after diffusion, before submitting the command buffer.
-    pub fn record_compute(&self, cmd: vk::CommandBuffer, current_buffer: usize) {
+    pub fn record_compute(&self, cmd: vk::CommandBuffer, conc_current_buffer: usize, temperature_current_buffer: usize) {
         let push_constants = CoarsePushConstants {
             full_width: self.full_width,
             full_height: self.full_height,
@@ -463,7 +560,7 @@ impl CoarseGrid {
             _pad: [0, 0],
         };
 
-        let descriptor_set = self.coarse_descriptor_sets[current_buffer];
+        let descriptor_set = self.coarse_descriptor_sets[conc_current_buffer * 2 + temperature_current_buffer];
 
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -553,6 +650,12 @@ impl CoarseGrid {
                     .buffer(self.coarse_fluid_count_buffer.buffer)
                     .offset(0)
                     .size(vk::WHOLE_SIZE),
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .buffer(self.coarse_temperature_buffer.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
             ];
 
             self.device.cmd_pipeline_barrier(
@@ -596,6 +699,20 @@ impl CoarseGrid {
                 self.coarse_fluid_count_buffer.buffer,
                 self.cell_readback_buffer.buffer,
                 &[count_copy],
+            );
+
+            let temperature_offset = coarse_idx as usize * std::mem::size_of::<f32>();
+            let temperature_dst_offset = (self.species_count * std::mem::size_of::<f32>()) + std::mem::size_of::<u32>();
+            let temperature_copy = vk::BufferCopy::default()
+                .src_offset(temperature_offset as u64)
+                .dst_offset(temperature_dst_offset as u64)
+                .size(std::mem::size_of::<f32>() as u64);
+
+            self.device.cmd_copy_buffer(
+                self.readback_command_buffer,
+                self.coarse_temperature_buffer.buffer,
+                self.cell_readback_buffer.buffer,
+                &[temperature_copy],
             );
             
             if self.device.end_command_buffer(self.readback_command_buffer).is_err() {
@@ -658,12 +775,20 @@ impl CoarseGrid {
                     } else {
                         0
                     };
+                    let mean_temperature_kelvin = if let Some(slice) = mapped {
+                        let offset = (self.species_count * std::mem::size_of::<f32>()) + std::mem::size_of::<u32>();
+                        let bytes = &slice[offset..offset + 4];
+                        f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                    } else {
+                        293.15
+                    };
                     
                     let mip_squared = self.mip_factor * self.mip_factor;
                     let solid_count = mip_squared.saturating_sub(fluid_count);
                     
                     let cell = ReadbackCell {
                         concentrations: concs.clone(),
+                        mean_temperature_kelvin,
                         fluid_count,
                         solid_count,
                         coord,
@@ -675,6 +800,7 @@ impl CoarseGrid {
                     
                     Some(CoarseCellData {
                         concentrations: concs,
+                        mean_temperature_kelvin,
                         fluid_count,
                         solid_count,
                         coord,
@@ -684,17 +810,6 @@ impl CoarseGrid {
                     None
                 }
             }
-            ReadbackState::Ready(cell) => {
-                let data = CoarseCellData {
-                    concentrations: cell.concentrations.clone(),
-                    fluid_count: cell.fluid_count,
-                    solid_count: cell.solid_count,
-                    coord: cell.coord,
-                    age: cell.timestamp.elapsed(),
-                };
-                self.readback_state = ReadbackState::Idle;
-                Some(data)
-            }
         }
     }
     
@@ -702,6 +817,7 @@ impl CoarseGrid {
     pub fn get_cached_cell(&self) -> Option<CoarseCellData> {
         self.cached_cell.as_ref().map(|cell| CoarseCellData {
             concentrations: cell.concentrations.clone(),
+            mean_temperature_kelvin: cell.mean_temperature_kelvin,
             fluid_count: cell.fluid_count,
             solid_count: cell.solid_count,
             coord: cell.coord,
@@ -740,6 +856,9 @@ impl Drop for CoarseGrid {
             
             self.device.destroy_buffer(self.coarse_fluid_count_buffer.buffer, None);
             alloc.free(std::mem::take(&mut self.coarse_fluid_count_buffer.allocation)).ok();
+
+            self.device.destroy_buffer(self.coarse_temperature_buffer.buffer, None);
+            alloc.free(std::mem::take(&mut self.coarse_temperature_buffer.allocation)).ok();
             
             self.device.destroy_buffer(self.cell_readback_buffer.buffer, None);
             alloc.free(std::mem::take(&mut self.cell_readback_buffer.allocation)).ok();

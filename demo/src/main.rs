@@ -43,7 +43,6 @@ struct PerformanceSample {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct RenderFrameMetrics {
-    simulation_cpu_ms: f32,
     upload_ms: f32,
     render_ms: f32,
 }
@@ -261,9 +260,12 @@ impl DemoApp {
                 self.tooltip_text = format!(
                     "Coarse Cell ({}, {})\n\
                      Fluid: {} / Solid: {}\n\
+                     Temp: {:.2} K ({:.2} C)\n\
                      Species:\n{}",
                     data.coord.0, data.coord.1,
                     data.fluid_count, data.solid_count,
+                    data.mean_temperature_kelvin,
+                    data.mean_temperature_kelvin - 273.15,
                     species_lines,
                 );
                 self.show_tooltip = true;
@@ -287,9 +289,12 @@ impl DemoApp {
                 self.tooltip_text = format!(
                     "Coarse Cell ({}, {})\n\
                      Fluid: {} / Solid: {}\n\
+                     Temp: {:.2} K ({:.2} C)\n\
                      Species:\n{}",
                     data.coord.0, data.coord.1,
                     data.fluid_count, data.solid_count,
+                    data.mean_temperature_kelvin,
+                    data.mean_temperature_kelvin - 273.15,
                     species_lines,
                 );
                 self.show_tooltip = true;
@@ -546,9 +551,7 @@ impl DemoApp {
             ctx.device.begin_command_buffer(cmd, &begin_info)?;
         }
 
-        let t_sim0 = Instant::now();
         sim.record_render_barriers(cmd);
-        let t_sim1 = Instant::now();
         
         // Record fluid visualization (keeps render pass open)
         pipeline.record(ctx, cmd, image_index as usize, self.thermal_view);
@@ -575,7 +578,6 @@ impl DemoApp {
 
         let t3 = Instant::now();
         Ok(RenderFrameMetrics {
-            simulation_cpu_ms: (t_sim1 - t_sim0).as_secs_f64() as f32 * 1000.0,
             upload_ms: (t1 - t0).as_secs_f64() as f32 * 1000.0,
             render_ms: (t3 - t1).as_secs_f64() as f32 * 1000.0,
         })

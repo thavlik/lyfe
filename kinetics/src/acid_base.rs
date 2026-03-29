@@ -144,7 +144,7 @@ impl RuleEvaluator for AcidBaseEvaluator {
 mod tests {
     use super::*;
     use crate::snapshot::{
-        SemanticSnapshot, SemanticTile, SpeciesAmount, SpeciesTableSnapshot, TileFlags,
+        SemanticSnapshot, SpeciesAmount, SpeciesTableSnapshot, TileFlags,
     };
     use crate::SpeciesId;
 

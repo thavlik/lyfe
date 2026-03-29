@@ -13,9 +13,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Maximum time to wait for the Lean process (seconds).
-const LEAN_TIMEOUT_SECS: u64 = 5;
-
 /// Bridge to the Lean rule engine binary.
 pub struct LeanBridge {
     /// Resolved path to the `lyfe-rules` binary.
