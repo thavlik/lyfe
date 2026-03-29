@@ -9,6 +9,7 @@
 //! - +/-: Adjust inspection mip factor
 //! - Escape: Exit
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -26,6 +27,33 @@ use winit::{
 
 const _TARGET_FPS: f64 = 60.0;
 const _FRAME_TIME: Duration = Duration::from_nanos((1_000_000_000.0 / _TARGET_FPS) as u64);
+const PERFORMANCE_WINDOW: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy)]
+struct PerformanceSample {
+    timestamp: Instant,
+    frame_ms: f32,
+    simulation_ms: f32,
+    tooltip_ms: f32,
+    ui_ms: f32,
+    render_ms: f32,
+    upload_ms: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RenderFrameMetrics {
+    render_state_ms: f32,
+    upload_ms: f32,
+    render_ms: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PerformanceSummary {
+    current_frame_ms: f32,
+    current_fps: f32,
+    average_fps_30s: f32,
+    worst_frame_ms_30s: f32,
+}
 
 /// Which scenario to run.
 #[derive(Debug, Clone, Copy, Default)]
@@ -71,12 +99,14 @@ struct DemoApp {
     
     // Thermal view (momentary display while T is held)
     thermal_view: bool,
+    performance_overlay: bool,
     
     // Timing
     last_frame: Instant,
     frame_count: u64,
     fps_update_time: Instant,
     current_fps: f64,
+    performance_samples: VecDeque<PerformanceSample>,
     
     // Flags
     needs_resize: bool,
@@ -98,10 +128,12 @@ impl DemoApp {
             tooltip_text: String::new(),
             species_names: Vec::new(),
             thermal_view: false,
+            performance_overlay: false,
             last_frame: Instant::now(),
             frame_count: 0,
             fps_update_time: Instant::now(),
             current_fps: 0.0,
+            performance_samples: VecDeque::new(),
             needs_resize: false,
             smoke_test,
             scenario,
@@ -251,6 +283,177 @@ impl DemoApp {
             }
         }
     }
+
+    fn push_performance_sample(&mut self, sample: PerformanceSample) {
+        self.performance_samples.push_back(sample);
+        let cutoff = sample.timestamp - PERFORMANCE_WINDOW;
+        while let Some(front) = self.performance_samples.front() {
+            if front.timestamp >= cutoff {
+                break;
+            }
+            self.performance_samples.pop_front();
+        }
+    }
+
+    fn performance_summary(&self) -> PerformanceSummary {
+        let current_frame_ms = self.performance_samples.back().map(|s| s.frame_ms).unwrap_or(0.0);
+        let current_fps = if current_frame_ms > 0.0 { 1000.0 / current_frame_ms } else { 0.0 };
+
+        let average_fps_30s = match (self.performance_samples.front(), self.performance_samples.back()) {
+            (Some(first), Some(last)) if self.performance_samples.len() >= 2 => {
+                let elapsed = (last.timestamp - first.timestamp).as_secs_f32();
+                if elapsed > 0.0 {
+                    (self.performance_samples.len() as f32 - 1.0) / elapsed
+                } else {
+                    current_fps
+                }
+            }
+            _ => current_fps,
+        };
+
+        let worst_frame_ms_30s = self.performance_samples.iter()
+            .map(|s| s.frame_ms)
+            .fold(0.0_f32, f32::max);
+
+        PerformanceSummary {
+            current_frame_ms,
+            current_fps,
+            average_fps_30s,
+            worst_frame_ms_30s,
+        }
+    }
+
+    fn draw_performance_overlay(
+        ctx: &egui::Context,
+        performance_overlay: bool,
+        summary: PerformanceSummary,
+        samples: &[PerformanceSample],
+    ) {
+        use egui::{Align2, Color32, Frame, Margin, RichText, Sense, Stroke, Vec2};
+
+        if !performance_overlay {
+            return;
+        }
+
+        let metrics = [
+            ("Frame", Color32::from_rgb(255, 99, 71), samples.iter().map(|s| s.frame_ms).collect::<Vec<_>>()),
+            ("Simulation", Color32::from_rgb(86, 204, 242), samples.iter().map(|s| s.simulation_ms).collect::<Vec<_>>()),
+            ("Render", Color32::from_rgb(242, 201, 76), samples.iter().map(|s| s.render_ms).collect::<Vec<_>>()),
+            ("UI", Color32::from_rgb(155, 81, 224), samples.iter().map(|s| s.ui_ms).collect::<Vec<_>>()),
+            ("Upload", Color32::from_rgb(39, 174, 96), samples.iter().map(|s| s.upload_ms).collect::<Vec<_>>()),
+            ("Tooltip", Color32::from_rgb(235, 87, 87), samples.iter().map(|s| s.tooltip_ms).collect::<Vec<_>>()),
+        ];
+
+        egui::Area::new("performance_stats".into())
+            .anchor(Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+            .show(ctx, |ui: &mut egui::Ui| {
+                Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 220))
+                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)))
+                    .inner_margin(Margin::same(12.0))
+                    .show(ui, |ui: &mut egui::Ui| {
+                        ui.set_min_width(240.0);
+                        ui.label(RichText::new("Performance").strong().size(18.0).color(Color32::WHITE));
+                        ui.add_space(6.0);
+                        ui.label(format!("Frame: {:.2} ms", summary.current_frame_ms));
+                        ui.label(format!("FPS: {:.1}", summary.current_fps));
+                        ui.label(format!("Avg FPS (30s): {:.1}", summary.average_fps_30s));
+                        ui.label(format!("Worst Frame (30s): {:.2} ms", summary.worst_frame_ms_30s));
+                    });
+            });
+
+        egui::Area::new("performance_graph".into())
+            .anchor(Align2::LEFT_BOTTOM, egui::vec2(16.0, -16.0))
+            .show(ctx, |ui: &mut egui::Ui| {
+                let available_width = (ctx.screen_rect().width() - 32.0).max(480.0);
+                let graph_size = Vec2::new(available_width, 210.0);
+
+                Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(7, 10, 15, 210))
+                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)))
+                    .inner_margin(Margin::same(12.0))
+                    .show(ui, |ui: &mut egui::Ui| {
+                        ui.horizontal_wrapped(|ui: &mut egui::Ui| {
+                            for (label, color, _) in &metrics {
+                                ui.colored_label(*color, "■");
+                                ui.label(*label);
+                                ui.add_space(10.0);
+                            }
+                        });
+                        ui.add_space(10.0);
+
+                        let (rect, _) = ui.allocate_exact_size(graph_size, Sense::hover());
+                        let painter = ui.painter_at(rect);
+                        painter.rect_filled(rect, 10.0, Color32::from_rgba_unmultiplied(15, 21, 30, 200));
+                        painter.rect_stroke(
+                            rect,
+                            10.0,
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 20)),
+                        );
+
+                        let left_pad = 42.0;
+                        let right_pad = 10.0;
+                        let top_pad = 10.0;
+                        let bottom_pad = 24.0;
+                        let plot = egui::Rect::from_min_max(
+                            egui::pos2(rect.left() + left_pad, rect.top() + top_pad),
+                            egui::pos2(rect.right() - right_pad, rect.bottom() - bottom_pad),
+                        );
+
+                        let max_ms = metrics.iter()
+                            .flat_map(|(_, _, values)| values.iter().copied())
+                            .fold(16.0_f32, f32::max)
+                            .max(1.0);
+
+                        for step in 0..=4 {
+                            let t = step as f32 / 4.0;
+                            let y = egui::lerp(plot.bottom()..=plot.top(), t);
+                            painter.line_segment(
+                                [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+                                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+                            );
+                            let value = max_ms * t;
+                            painter.text(
+                                egui::pos2(plot.left() - 8.0, y),
+                                Align2::RIGHT_CENTER,
+                                format!("{value:.0}"),
+                                egui::TextStyle::Small.resolve(ui.style()),
+                                Color32::from_gray(180),
+                            );
+                        }
+
+                        if samples.len() >= 2 {
+                            for (label, color, values) in &metrics {
+                                let _ = label;
+                                let points: Vec<_> = values.iter().enumerate().map(|(index, value)| {
+                                    let x_t = index as f32 / (values.len().saturating_sub(1) as f32);
+                                    let y_t = (*value / max_ms).clamp(0.0, 1.0);
+                                    egui::pos2(
+                                        egui::lerp(plot.left()..=plot.right(), x_t),
+                                        egui::lerp(plot.bottom()..=plot.top(), y_t),
+                                    )
+                                }).collect();
+                                painter.add(egui::Shape::line(points, Stroke::new(2.0, *color)));
+                            }
+                        }
+
+                        painter.text(
+                            egui::pos2(plot.left(), rect.bottom() - 10.0),
+                            Align2::LEFT_BOTTOM,
+                            "30s ago",
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            Color32::from_gray(160),
+                        );
+                        painter.text(
+                            egui::pos2(plot.right(), rect.bottom() - 10.0),
+                            Align2::RIGHT_BOTTOM,
+                            "now",
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            Color32::from_gray(160),
+                        );
+                    });
+            });
+    }
     
     fn _update_tooltip_expensive(&mut self) {
         let sim = self.simulation.as_mut().unwrap();
@@ -284,7 +487,7 @@ impl DemoApp {
         }
     }
 
-    fn render_frame(&mut self) -> Result<bool> {
+    fn render_frame(&mut self) -> Result<RenderFrameMetrics> {
         let ctx = self.render_ctx.as_mut().unwrap();
         let pipeline = self.render_pipeline.as_mut().unwrap();
         let sim = self.simulation.as_mut().unwrap();
@@ -298,7 +501,7 @@ impl DemoApp {
             None => {
                 log::debug!("begin_frame returned None, needs resize");
                 self.needs_resize = true;
-                return Ok(false);
+                return Ok(RenderFrameMetrics::default());
             }
         };
 
@@ -355,8 +558,13 @@ impl DemoApp {
         
         // Free egui textures after rendering is complete
         egui.free_textures()?;
-        
-        Ok(true)
+
+        let t3 = Instant::now();
+        Ok(RenderFrameMetrics {
+            render_state_ms: (t1 - t0).as_secs_f64() as f32 * 1000.0,
+            upload_ms: (t2 - t1).as_secs_f64() as f32 * 1000.0,
+            render_ms: (t3 - t2).as_secs_f64() as f32 * 1000.0,
+        })
     }
 
     fn handle_resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -393,6 +601,26 @@ impl ApplicationHandler for DemoApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        let is_performance_toggle = matches!(
+            &event,
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    logical_key: Key::Named(NamedKey::Tab),
+                    state: ElementState::Pressed,
+                    ..
+                },
+                ..
+            }
+        );
+
+        if is_performance_toggle {
+            self.performance_overlay = !self.performance_overlay;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
+
         // Pass to egui first, but don't skip RedrawRequested - we always need to render
         let egui_wants_event = if let Some(egui) = &mut self.egui_renderer {
             if let Some(window) = &self.window {
@@ -489,6 +717,10 @@ impl ApplicationHandler for DemoApp {
                 // Update tooltip
                 self.update_tooltip();
                 let t2 = Instant::now();
+
+                let performance_overlay = self.performance_overlay;
+                let performance_summary = self.performance_summary();
+                let performance_samples: Vec<_> = self.performance_samples.iter().copied().collect();
                 
                 // Render egui overlay (not actually rendered to screen)
                 if let (Some(egui), Some(window)) = (&mut self.egui_renderer, &self.window) {
@@ -504,21 +736,13 @@ impl ApplicationHandler for DemoApp {
                                 ui.monospace(&self.tooltip_text);
                             });
                     }
-                    
-                    // Show FPS
-                    egui::Window::new("Stats")
-                        .fixed_pos(egui::pos2(10.0, 10.0))
-                        .collapsible(false)
-                        .resizable(false)
-                        .show(egui.context(), |ui| {
-                            ui.label(format!("FPS: {:.1}", self.current_fps));
-                            if let Some(sim) = &self.simulation {
-                                ui.label(format!("Steps: {}", sim.step_count()));
-                                ui.label(format!("Time: {:.2}s", sim.time()));
-                                ui.label(format!("Paused: {}", sim.is_paused()));
-                            }
-                            ui.label(format!("Mip: {}", self.inspection_mip));
-                        });
+
+                    Self::draw_performance_overlay(
+                        egui.context(),
+                        performance_overlay,
+                        performance_summary,
+                        &performance_samples,
+                    );
                     
                     let _output = egui.end_frame(window);
                 }
@@ -534,13 +758,24 @@ impl ApplicationHandler for DemoApp {
                     }
                 }
                 
-                match self.render_frame() {
-                    Ok(_) => {}
+                let render_metrics = match self.render_frame() {
+                    Ok(metrics) => metrics,
                     Err(e) => {
                         log::error!("Render failed: {}", e);
+                        RenderFrameMetrics::default()
                     }
-                }
+                };
                 let t4 = Instant::now();
+
+                self.push_performance_sample(PerformanceSample {
+                    timestamp: t4,
+                    frame_ms: (t4 - frame_start).as_secs_f64() as f32 * 1000.0,
+                    simulation_ms: (t1 - t0).as_secs_f64() as f32 * 1000.0,
+                    tooltip_ms: (t2 - t1).as_secs_f64() as f32 * 1000.0,
+                    ui_ms: (t3 - t2).as_secs_f64() as f32 * 1000.0,
+                    render_ms: render_metrics.render_ms,
+                    upload_ms: render_metrics.upload_ms + render_metrics.render_state_ms,
+                });
                 
                 // Log step count periodically
                 if let Some(sim) = &self.simulation {
