@@ -20,7 +20,7 @@ open LyfeRules
 
 def main : IO Unit := do
   -- Read entire stdin
-  let input ← IO.stdin.readToEnd
+  let input ← IO.FS.readFile "/dev/stdin"
 
   -- Parse JSON
   let json ← match Json.parse input with

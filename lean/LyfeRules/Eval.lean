@@ -15,16 +15,12 @@ namespace LyfeRules.Eval
 /-- Run all registered rules against the snapshot.
     New rules are added here — no Rust changes required. -/
 def evaluateAll (snap : Snapshot) : EvalResult :=
-  let mut rules : Array ReactionRule := #[]
-  let mut diags : Array String := #[]
-
-  -- Acid-base neutralisation
-  match AcidBase.evaluate snap with
-  | some rule =>
-    rules := rules.push rule
-    diags := diags.push s!"H⁺+OH⁻ reaction active in {rule.applicableTileIds.size} tiles"
-  | none =>
-    diags := diags.push "H⁺+OH⁻ reaction: no co-located reactants"
+  let rules := AcidBase.evaluate snap
+  let diags := if rules.isEmpty then
+    #["acid/base evaluator: no active rules"]
+  else
+    rules.map fun rule =>
+      s!"{rule.reactionName} active in {rule.applicableTileIds.size} tiles"
 
   -- Future rules go here:
   -- match SomeOtherRule.evaluate snap with ...

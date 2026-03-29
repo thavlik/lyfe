@@ -208,6 +208,10 @@ pub struct ReactionDirective {
     pub reactant_a: String,
     /// Reactant B species name (looked up in species registry)
     pub reactant_b: String,
+    /// Product A species name (empty when the reaction has no first product)
+    pub product_a: String,
+    /// Product B species name (empty when the reaction has no second product)
+    pub product_b: String,
     /// Tiles where this reaction should be applied
     pub applicable_tile_ids: Vec<u32>,
     /// Maximum extent per second (limits reaction rate)
@@ -236,6 +240,8 @@ impl ReactionDirective {
             reaction_name: String::new(),
             reactant_a: String::new(),
             reactant_b: String::new(),
+            product_a: String::new(),
+            product_b: String::new(),
             applicable_tile_ids: Vec::new(),
             max_extent_per_second: f64::MAX,
             rate_constant: 1.0,

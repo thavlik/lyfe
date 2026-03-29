@@ -420,18 +420,36 @@ impl SemanticUpdateApplicator {
         directive: &kinetics::ReactionDirective,
         species_registry: &SpeciesRegistry,
     ) -> Option<GpuReactionRule> {
-        // Look up reactant species indices by name (rule-agnostic)
-        let a_idx = species_registry.index_of_name(&directive.reactant_a);
-        let b_idx = species_registry.index_of_name(&directive.reactant_b);
+        let lookup_optional_species = |name: &str| -> Option<Option<u32>> {
+            if name.is_empty() {
+                Some(None)
+            } else {
+                species_registry.index_of_name(name).map(|idx| Some(idx as u32))
+            }
+        };
 
-        let (a_idx, b_idx) = match (a_idx, b_idx) {
-            (Some(a), Some(b)) => (a, b),
+        let a_idx = species_registry.index_of_name(&directive.reactant_a);
+        let b_idx = lookup_optional_species(&directive.reactant_b);
+        let product_a_idx = lookup_optional_species(&directive.product_a);
+        let product_b_idx = lookup_optional_species(&directive.product_b);
+
+        let (a_idx, b_idx, product_a_idx, product_b_idx) = match (
+            a_idx,
+            b_idx,
+            product_a_idx,
+            product_b_idx,
+        ) {
+            (Some(a), Some(b), Some(product_a), Some(product_b)) => {
+                (a as u32, b, product_a, product_b)
+            }
             _ => {
                 log::warn!(
-                    "Reaction '{}': species '{}' or '{}' not found in registry, skipping",
+                    "Reaction '{}': species mapping failed for reactants/products ('{}', '{}') -> ('{}', '{}'), skipping",
                     directive.reaction_name,
                     directive.reactant_a,
                     directive.reactant_b,
+                    directive.product_a,
+                    directive.product_b,
                 );
                 return None;
             }
@@ -445,8 +463,10 @@ impl SemanticUpdateApplicator {
         let entropy = directive.entropy_delta_j_per_mol_k.unwrap_or(0.0) as f32;
 
         Some(GpuReactionRule::new(
-            a_idx as u32,
-            b_idx as u32,
+            a_idx,
+            b_idx,
+            product_a_idx,
+            product_b_idx,
             rate,
             enthalpy,
             entropy,

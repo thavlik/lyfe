@@ -3,12 +3,12 @@
 // Reaction compute shader
 //
 // Applies reaction rules to concentrations.
-// Each rule has the form:  reactant_a + reactant_b → products
+// Each rule has the form:
+//   reactant_a [+ reactant_b] -> [product_a] [+ product_b]
 // with an effective rate, enthalpy delta, and entropy delta.
 //
-// The shader consumes the limiting reactant at a rate determined by:
-//   extent = min(c_a, c_b) * effective_rate * dt
-// where effective_rate incorporates Arrhenius temperature dependence.
+// Bimolecular rules use extent = k * c_a * c_b * dt.
+// Unimolecular rules use extent = k * c_a * dt.
 //
 // Layout: [species][cell] where cell = y * width + x
 // Dispatch: (ceil(cell_count / 256), 1, 1)
@@ -32,7 +32,9 @@ layout(push_constant) uniform PushConstants {
 // A single reaction rule, tightly packed for GPU.
 struct ReactionRule {
     uint reactant_a_index;       // species dense index of first reactant
-    uint reactant_b_index;       // species dense index of second reactant
+    uint reactant_b_index;       // species dense index of second reactant, or 0xFFFFFFFF
+    uint product_a_index;        // species dense index of first product, or 0xFFFFFFFF
+    uint product_b_index;        // species dense index of second product, or 0xFFFFFFFF
     float effective_rate;        // effective rate (pre-scaled for simulation)
     float enthalpy_delta;        // J/mol (negative = exothermic)
     float entropy_delta;         // J/(mol*K)
@@ -55,9 +57,13 @@ layout(set = 0, binding = 2) buffer Temperatures {
 
 // Binding 3: Reaction rules buffer
 layout(set = 0, binding = 3) readonly buffer ReactionRules {
-    // Packed as: [reactant_a_index, reactant_b_index, effective_rate_bits, enthalpy_bits, entropy_bits] per rule
+    // Packed as:
+    // [reactant_a_index, reactant_b_index, product_a_index, product_b_index,
+    //  effective_rate_bits, enthalpy_bits, entropy_bits] per rule
     uint reaction_data[];
 };
+
+const uint NO_SPECIES = 0xFFFFFFFFu;
 
 void main() {
     uint cell_index = gl_GlobalInvocationID.x;
@@ -74,26 +80,32 @@ void main() {
 
     // Apply each reaction rule
     for (uint r = 0; r < num_reactions; r++) {
-        uint base = r * 5;
+        uint base = r * 7;
         uint idx_a = reaction_data[base + 0];
         uint idx_b = reaction_data[base + 1];
-        float k = uintBitsToFloat(reaction_data[base + 2]);
-        float dH = uintBitsToFloat(reaction_data[base + 3]);
-        float dS = uintBitsToFloat(reaction_data[base + 4]);
+        uint product_a_idx = reaction_data[base + 2];
+        uint product_b_idx = reaction_data[base + 3];
+        float k = uintBitsToFloat(reaction_data[base + 4]);
+        float dH = uintBitsToFloat(reaction_data[base + 5]);
+        float dS = uintBitsToFloat(reaction_data[base + 6]);
 
         // Read current concentrations of reactants
         float c_a = conc[idx_a * cell_count + cell_index];
-        float c_b = conc[idx_b * cell_count + cell_index];
+        bool has_second_reactant = idx_b != NO_SPECIES;
+        float c_b = has_second_reactant ? conc[idx_b * cell_count + cell_index] : 1.0;
         float local_temperature = max(temperatures[cell_index], 1.0);
 
         // Gibbs free energy: ΔG = ΔH - TΔS.
         float dG = dH - local_temperature * dS;
 
-        // Reaction extent: second-order kinetics limited by both reactants
-        // extent = k * c_a * c_b * dt, clamped to not exceed either reactant
-        float extent = k * c_a * c_b * dt;
+        float extent = k * c_a * dt;
+        if (has_second_reactant) {
+            extent *= c_b;
+        }
         extent = min(extent, c_a);
-        extent = min(extent, c_b);
+        if (has_second_reactant) {
+            extent = min(extent, c_b);
+        }
         extent = max(extent, 0.0);  // safety: no negative extent
 
         if (extent < 1e-12) {
@@ -102,7 +114,16 @@ void main() {
 
         // Consume reactants (1:1 stoichiometry)
         conc[idx_a * cell_count + cell_index] -= extent;
-        conc[idx_b * cell_count + cell_index] -= extent;
+        if (has_second_reactant) {
+            conc[idx_b * cell_count + cell_index] -= extent;
+        }
+
+        if (product_a_idx != NO_SPECIES) {
+            conc[product_a_idx * cell_count + cell_index] += extent;
+        }
+        if (product_b_idx != NO_SPECIES) {
+            conc[product_b_idx * cell_count + cell_index] += extent;
+        }
 
         // Thermal effect from Gibbs free energy release/uptake.
         // Negative ΔG releases usable energy; positive ΔG cools the cell.

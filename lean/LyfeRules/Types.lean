@@ -62,6 +62,8 @@ structure ReactionRule where
   reactionName        : String
   reactantA           : String
   reactantB           : String
+  productA            : String
+  productB            : String
   /-- Physical rate constant (L·mol⁻¹·s⁻¹) — for reference / Arrhenius. -/
   rateConstant        : Float
   /-- Effective rate for GPU simulation, pre-scaled for visual stability. -/
@@ -80,16 +82,18 @@ structure ReactionRule where
 
 instance : ToJson ReactionRule where
   toJson r := .mkObj [
-    ("reaction_name",                r.reactionName),
-    ("reactant_a",                   r.reactantA),
-    ("reactant_b",                   r.reactantB),
-    ("rate_constant",                r.rateConstant),
-    ("effective_rate",               r.effectiveRate),
-    ("enthalpy_delta_j_per_mol",     r.enthalpyDelta),
-    ("gibbs_free_energy_j_per_mol",  r.gibbsFreeEnergy),
-    ("entropy_delta_j_per_mol_k",    r.entropyDelta),
-    ("activation_energy_j_per_mol",  r.activationEnergy),
-    ("is_reversible",                r.isReversible),
+    ("reaction_name",                ToJson.toJson r.reactionName),
+    ("reactant_a",                   ToJson.toJson r.reactantA),
+    ("reactant_b",                   ToJson.toJson r.reactantB),
+    ("product_a",                    ToJson.toJson r.productA),
+    ("product_b",                    ToJson.toJson r.productB),
+    ("rate_constant",                ToJson.toJson r.rateConstant),
+    ("effective_rate",               ToJson.toJson r.effectiveRate),
+    ("enthalpy_delta",               ToJson.toJson r.enthalpyDelta),
+    ("gibbs_free_energy",            ToJson.toJson r.gibbsFreeEnergy),
+    ("entropy_delta",                ToJson.toJson r.entropyDelta),
+    ("activation_energy",            ToJson.toJson r.activationEnergy),
+    ("is_reversible",                ToJson.toJson r.isReversible),
     ("applicable_tile_ids",          ToJson.toJson r.applicableTileIds)
   ]
 

@@ -81,7 +81,7 @@ enum Commands {
     Basic,
     /// Acid-base neutralization: H⁺ + OH⁻ → H₂O
     AcidBase,
-    /// Weak-acid buffer vs NaOH using dissociated ionic species
+    /// Weak-acid buffer vs NaOH with acetic-acid equilibrium
     Buffers,
 }
 
@@ -929,6 +929,7 @@ fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]>
         ("OH-", [0.6, 0.2, 0.9]),    // Purple
         ("Ca2+",[0.9, 0.6, 0.1]),    // Orange
         ("SO4(2-)", [0.3, 0.7, 0.9]),// Teal
+        ("CH3COOH", [0.45, 0.9, 0.55]), // Mint green
         ("CH3COO-", [0.9, 0.55, 0.15]), // Amber
     ]);
 

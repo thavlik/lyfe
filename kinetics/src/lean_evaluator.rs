@@ -46,12 +46,21 @@ struct LeanSnapshot {
 struct LeanReactionRule {
     reaction_name: String,
     reactant_a: String,
+    #[serde(default)]
     reactant_b: String,
+    #[serde(default)]
+    product_a: String,
+    #[serde(default)]
+    product_b: String,
     rate_constant: f64,
     effective_rate: f64,
+    #[serde(rename = "enthalpy_delta")]
     enthalpy_delta: f64,
+    #[serde(rename = "gibbs_free_energy")]
     gibbs_free_energy: f64,
+    #[serde(rename = "entropy_delta")]
     entropy_delta: f64,
+    #[serde(rename = "activation_energy")]
     activation_energy: f64,
     is_reversible: bool,
     applicable_tile_ids: Vec<u32>,
@@ -141,6 +150,8 @@ impl LeanEvaluator {
             reaction_name: rule.reaction_name,
             reactant_a: rule.reactant_a,
             reactant_b: rule.reactant_b,
+            product_a: rule.product_a,
+            product_b: rule.product_b,
             applicable_tile_ids: rule.applicable_tile_ids,
             max_extent_per_second: f64::MAX,
             rate_constant: rule.rate_constant,

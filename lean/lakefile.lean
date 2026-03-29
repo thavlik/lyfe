@@ -6,6 +6,8 @@ package «lyfe-rules» where
     ⟨`autoImplicit, false⟩
   ]
 
+lean_lib LyfeRules where
+
 @[default_target]
 lean_exe «lyfe-rules» where
   root := `Main

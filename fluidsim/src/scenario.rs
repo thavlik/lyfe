@@ -392,11 +392,11 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
 
 /// Create a weak-acid buffer scenario.
 ///
-/// Top-left region: 0.35 M sodium acetate + 0.35 M acetic acid represented as
-/// dissociated species in the ionic soup:
+/// Top-left region: 0.35 M sodium acetate + 0.35 M acetic acid.
 /// - Na+ = 0.35 M
-/// - H+ = 0.35 M
-/// - CH3COO- = 0.70 M
+/// - CH3COO- = 0.35 M
+/// - CH3COOH = 0.35 M
+/// - H+ = Ka ≈ 1.8e-5 M
 ///
 /// Bottom-right region: 0.2 M NaOH represented as:
 /// - Na+ = 0.2 M
@@ -423,6 +423,7 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
         .register_species("H+")
         .register_species("OH-")
         .register_species("Na+")
+        .register_species("CH3COOH")
         .register_species("CH3COO-");
 
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
@@ -436,6 +437,7 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
     let h_id = builder.species_registry.id_of("H+").unwrap();
     let oh_id = builder.species_registry.id_of("OH-").unwrap();
     let na_id = builder.species_registry.id_of("Na+").unwrap();
+    let acetic_acid_id = builder.species_registry.id_of("CH3COOH").unwrap();
     let acetate_id = builder.species_registry.id_of("CH3COO-").unwrap();
 
     let inner_width = (inner_x1 - inner_x0) as f32;
@@ -452,7 +454,7 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
             let ny = (y - inner_y0) as f32 / inner_height;
 
             if nx + ny < 1.0 {
-                // Top-left: sodium acetate + acetic acid, represented as ions.
+                // Top-left: sodium acetate + acetic acid buffer near pKa.
                 builder.initial_concentrations
                     .entry(index)
                     .or_default()
@@ -460,11 +462,15 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
                 builder.initial_concentrations
                     .entry(index)
                     .or_default()
-                    .set(h_id, 0.35);
+                    .set(h_id, 1.8e-5);
                 builder.initial_concentrations
                     .entry(index)
                     .or_default()
-                    .set(acetate_id, 0.70);
+                    .set(acetate_id, 0.35);
+                builder.initial_concentrations
+                    .entry(index)
+                    .or_default()
+                    .set(acetic_acid_id, 0.35);
             } else {
                 // Bottom-right: 0.2 M NaOH.
                 builder.initial_concentrations
@@ -475,6 +481,7 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
                     .entry(index)
                     .or_default()
                     .set(oh_id, 0.2);
+                builder.initial_temperatures[index] = 288.15;
             }
         }
     }

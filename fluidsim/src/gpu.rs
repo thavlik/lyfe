@@ -106,16 +106,30 @@ pub struct ChargeProjectionPushConstants {
 pub struct GpuReactionRule {
     pub reactant_a_index: u32,
     pub reactant_b_index: u32,
+    pub product_a_index: u32,
+    pub product_b_index: u32,
     pub effective_rate_bits: u32, // f32 bit-cast
     pub enthalpy_delta_bits: u32, // f32 bit-cast
     pub entropy_delta_bits: u32, // f32 bit-cast
 }
 
 impl GpuReactionRule {
-    pub fn new(a: u32, b: u32, rate: f32, enthalpy: f32, entropy: f32) -> Self {
+    pub const NONE: u32 = u32::MAX;
+
+    pub fn new(
+        a: u32,
+        b: Option<u32>,
+        product_a: Option<u32>,
+        product_b: Option<u32>,
+        rate: f32,
+        enthalpy: f32,
+        entropy: f32,
+    ) -> Self {
         Self {
             reactant_a_index: a,
-            reactant_b_index: b,
+            reactant_b_index: b.unwrap_or(Self::NONE),
+            product_a_index: product_a.unwrap_or(Self::NONE),
+            product_b_index: product_b.unwrap_or(Self::NONE),
             effective_rate_bits: rate.to_bits(),
             enthalpy_delta_bits: enthalpy.to_bits(),
             entropy_delta_bits: entropy.to_bits(),
@@ -2228,6 +2242,8 @@ impl GpuSimulation {
         for r in rules {
             r.reactant_a_index.hash(&mut hasher);
             r.reactant_b_index.hash(&mut hasher);
+            r.product_a_index.hash(&mut hasher);
+            r.product_b_index.hash(&mut hasher);
             r.effective_rate_bits.hash(&mut hasher);
             r.enthalpy_delta_bits.hash(&mut hasher);
             r.entropy_delta_bits.hash(&mut hasher);

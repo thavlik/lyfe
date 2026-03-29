@@ -57,7 +57,7 @@ pub struct KineticsConfig {
 impl Default for KineticsConfig {
     fn default() -> Self {
         Self {
-            enable_lean: false, // Disabled until Lean integration is ready
+            enable_lean: true,
             lean_library_path: None,
             verbose: false,
             evaluation_timeout_seconds: 0.1, // 100ms max per evaluation
