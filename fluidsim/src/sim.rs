@@ -5,6 +5,7 @@
 //! requests, and provides access to simulation state.
 
 use crate::chemistry::{ChemicalEvolutionRule, NoOpEvolution};
+use crate::coarse::CoarseCellData;
 use crate::gpu::GpuSimulation;
 use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
@@ -135,13 +136,17 @@ impl Simulation {
     /// Step the simulation forward by dt seconds.
     pub fn step(&mut self, dt: f32) -> Result<()> {
         if self.paused {
+            log::trace!("Simulation is paused, skipping step");
             return Ok(());
         }
 
         // Run diffusion substeps
         let substep_dt = dt / self.config.diffusion_substeps as f32;
-        for _ in 0..self.config.diffusion_substeps {
+        log::trace!("Running {} substeps with dt={}, substep_dt={}, diffusion_rate={}",
+            self.config.diffusion_substeps, dt, substep_dt, self.config.diffusion_rate);
+        for i in 0..self.config.diffusion_substeps {
             self.gpu.step(substep_dt, self.config.diffusion_rate)?;
+            log::trace!("Completed substep {}", i);
         }
 
         // Evolution rule would be applied here
@@ -150,6 +155,20 @@ impl Simulation {
         self.time += dt as f64;
         self.step_count += 1;
         self.cache_dirty = true;
+
+        // Log sample concentrations every 60 steps
+        if self.step_count % 60 == 1 {
+            if let Ok(concs) = self.gpu.read_concentrations() {
+                // Sample center cell
+                let center_idx = (self.grid.height / 2 * self.grid.width + self.grid.width / 2) as usize;
+                log::info!("Step {}: Sample concentrations at center cell {}:", self.step_count, center_idx);
+                for (s, species_conc) in concs.iter().enumerate() {
+                    if species_conc[center_idx] > 0.0001 {
+                        log::info!("  Species {}: {:.6}", s, species_conc[center_idx]);
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -199,16 +218,31 @@ impl Simulation {
     }
 
     /// Get render state for visualization.
+    /// Note: Skips expensive GPU readback if data was recently refreshed
     pub fn render_state(&mut self) -> Result<RenderState> {
-        self.refresh_cache()?;
+        // Only refresh every 4 steps to avoid expensive GPU readback every frame
+        // This trades some visual latency for much better frame rate
+        let should_refresh = self.cache_dirty && (self.step_count % 4 == 0 || self.cached_concentrations.is_none());
+        
+        if should_refresh {
+            self.refresh_cache()?;
+        }
+
+        // Use cached data (may be up to 4 frames old)
+        let concentrations = self.cached_concentrations.clone()
+            .unwrap_or_else(|| vec![vec![0.0; (self.grid.width * self.grid.height) as usize]; self.species_registry.count()]);
+        let solid_mask = self.cached_solid_mask.clone()
+            .unwrap_or_else(|| vec![0; (self.grid.width * self.grid.height) as usize]);
+        let material_ids = self.cached_material_ids.clone()
+            .unwrap_or_else(|| vec![0; (self.grid.width * self.grid.height) as usize]);
 
         Ok(RenderState {
             width: self.grid.width,
             height: self.grid.height,
             species_count: self.species_registry.count(),
-            concentrations: self.cached_concentrations.clone().unwrap(),
-            solid_mask: self.cached_solid_mask.clone().unwrap(),
-            material_ids: self.cached_material_ids.clone().unwrap(),
+            concentrations,
+            solid_mask,
+            material_ids,
         })
     }
 
@@ -283,5 +317,60 @@ impl Simulation {
         
         *self = Self::from_scenario(scenario, config)?;
         Ok(())
+    }
+
+    // ============ Async Coarse Grid Inspection API ============
+    // These methods provide non-blocking tooltip inspection.
+    // The render thread is never blocked waiting for GPU data.
+
+    /// Request an async readback of the coarse cell at the given screen position.
+    /// Returns true if the request was accepted, false if rate-limited or no coarse grid.
+    pub fn request_async_inspection(&mut self, screen_x: f32, screen_y: f32) -> bool {
+        if let Some(ref mut coarse) = self.gpu.coarse_grid {
+            let (cx, cy) = coarse.screen_to_coarse(screen_x, screen_y);
+            coarse.request_cell_readback(cx, cy)
+        } else {
+            false
+        }
+    }
+
+    /// Poll for async inspection completion.
+    /// Returns Some(data) if new data is available, None otherwise.
+    /// This method never blocks.
+    pub fn poll_async_inspection(&mut self) -> Option<CoarseCellData> {
+        if let Some(ref mut coarse) = self.gpu.coarse_grid {
+            coarse.poll_readback()
+        } else {
+            None
+        }
+    }
+
+    /// Get the last cached coarse cell data, even if stale.
+    /// The `age` field indicates how old the data is.
+    pub fn get_cached_inspection(&self) -> Option<CoarseCellData> {
+        if let Some(ref coarse) = self.gpu.coarse_grid {
+            coarse.get_cached_cell()
+        } else {
+            None
+        }
+    }
+
+    /// Check if an async readback is currently pending.
+    pub fn is_inspection_pending(&self) -> bool {
+        if let Some(ref coarse) = self.gpu.coarse_grid {
+            coarse.is_readback_pending()
+        } else {
+            false
+        }
+    }
+
+    /// Get the coarse grid dimensions (if available).
+    pub fn coarse_dimensions(&self) -> Option<(u32, u32)> {
+        self.gpu.coarse_grid.as_ref().map(|c| (c.coarse_width, c.coarse_height))
+    }
+
+    /// Get the mip factor used for coarse grid.
+    pub fn coarse_mip_factor(&self) -> Option<u32> {
+        self.gpu.coarse_grid.as_ref().map(|c| c.mip_factor)
     }
 }

@@ -126,12 +126,76 @@ impl DemoApp {
             let grid_x = self.mouse_pos.0 * grid_w as f32 / size.width as f32;
             let grid_y = self.mouse_pos.1 * grid_h as f32 / size.height as f32;
             
+            // Request async readback of this cell (rate-limited internally)
+            let _ = sim.request_async_inspection(grid_x, grid_y);
+            
+            // Poll for any completed readbacks
+            if let Some(data) = sim.poll_async_inspection() {
+                // New data available - format it
+                self.tooltip_text = format!(
+                    "Coarse Cell ({}, {})\n\
+                     Fluid: {} / Solid: {}\n\
+                     Species: {}\n\
+                     Age: {:.0}ms",
+                    data.coord.0, data.coord.1,
+                    data.fluid_count, data.solid_count,
+                    data.concentrations.iter()
+                        .enumerate()
+                        .filter(|&(_, c)| *c > 0.001)
+                        .map(|(i, c)| format!("{}:{:.3}", i, c))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    data.age.as_secs_f64() * 1000.0
+                );
+                self.show_tooltip = true;
+            } else if let Some(data) = sim.get_cached_inspection() {
+                // Use cached data (may be stale)
+                self.tooltip_text = format!(
+                    "Coarse Cell ({}, {})\n\
+                     Fluid: {} / Solid: {}\n\
+                     Species: {}\n\
+                     Age: {:.0}ms (cached)",
+                    data.coord.0, data.coord.1,
+                    data.fluid_count, data.solid_count,
+                    data.concentrations.iter()
+                        .enumerate()
+                        .filter(|&(_, c)| *c > 0.001)
+                        .map(|(i, c)| format!("{}:{:.3}", i, c))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    data.age.as_secs_f64() * 1000.0
+                );
+                self.show_tooltip = true;
+            } else {
+                // No data yet
+                self.show_tooltip = false;
+            }
+        }
+    }
+    
+    fn _update_tooltip_expensive(&mut self) {
+        let sim = self.simulation.as_mut().unwrap();
+        let (grid_w, grid_h) = sim.dimensions();
+        
+        // Convert mouse position to grid coordinates
+        if let Some(window) = &self.window {
+            let size = window.inner_size();
+            let grid_x = self.mouse_pos.0 * grid_w as f32 / size.width as f32;
+            let grid_y = self.mouse_pos.1 * grid_h as f32 / size.height as f32;
+            
             match sim.inspect_with_mip(grid_x, grid_y, self.inspection_mip) {
                 Ok(result) => {
-                    self.tooltip_text = result.format_tooltip();
+                    let new_tooltip = result.format_tooltip();
+                    // Log when tooltip changes significantly
+                    if new_tooltip != self.tooltip_text {
+                        log::debug!("Inspection at ({:.0}, {:.0}): {}", grid_x, grid_y, 
+                            new_tooltip.replace('\n', " | "));
+                    }
+                    self.tooltip_text = new_tooltip;
                     self.show_tooltip = true;
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::trace!("Inspection error: {}", e);
                     self.show_tooltip = false;
                 }
             }
@@ -143,18 +207,34 @@ impl DemoApp {
         let pipeline = self.render_pipeline.as_mut().unwrap();
         let sim = self.simulation.as_mut().unwrap();
         
+        let t0 = Instant::now();
+        
         // Get render state and upload
         let state = sim.render_state()?;
+        let t1 = Instant::now();
+        
         pipeline.upload_state(ctx, &state)?;
+        let t2 = Instant::now();
+        
+        // Debug: Log frame presentation
+        let step = sim.step_count();
+        if step > 0 && step % 10 == 0 {
+            log::info!("Frame timing: render_state={:.1}ms upload={:.1}ms", 
+                (t1-t0).as_secs_f64()*1000.0, 
+                (t2-t1).as_secs_f64()*1000.0);
+        }
         
         // Begin frame
         let image_index = match ctx.begin_frame()? {
             Some(idx) => idx,
             None => {
+                log::debug!("begin_frame returned None, needs resize");
                 self.needs_resize = true;
                 return Ok(false);
             }
         };
+        
+        log::trace!("Rendering to swapchain image {}", image_index);
         
         // Record commands
         let cmd = ctx.current_command_buffer();
@@ -174,6 +254,7 @@ impl DemoApp {
         // End frame
         let ok = ctx.end_frame(image_index)?;
         if !ok {
+            log::debug!("end_frame returned false, needs resize");
             self.needs_resize = true;
         }
         
@@ -214,13 +295,26 @@ impl ApplicationHandler for DemoApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
-        // Pass to egui first
-        if let Some(egui) = &mut self.egui_renderer {
+        // Pass to egui first, but don't skip RedrawRequested - we always need to render
+        let egui_wants_event = if let Some(egui) = &mut self.egui_renderer {
             if let Some(window) = &self.window {
-                if egui.handle_event(window, &event) {
-                    return;
-                }
+                egui.handle_event(window, &event)
+            } else {
+                false
             }
+        } else {
+            false
+        };
+
+        // For most events, let egui consume them if it wants
+        // But always process RedrawRequested, Resized, and CloseRequested
+        let is_critical_event = matches!(
+            event,
+            WindowEvent::RedrawRequested | WindowEvent::Resized(_) | WindowEvent::CloseRequested
+        );
+        
+        if egui_wants_event && !is_critical_event {
+            return;
         }
 
         match event {
@@ -268,20 +362,23 @@ impl ApplicationHandler for DemoApp {
             }
             
             WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let dt = now.duration_since(self.last_frame);
+                let frame_start = Instant::now();
+                let dt = frame_start.duration_since(self.last_frame);
                 
                 // Update simulation
+                let t0 = Instant::now();
                 if let Some(sim) = &mut self.simulation {
                     if let Err(e) = sim.step(dt.as_secs_f32()) {
                         log::error!("Simulation step failed: {}", e);
                     }
                 }
+                let t1 = Instant::now();
                 
                 // Update tooltip
                 self.update_tooltip();
+                let t2 = Instant::now();
                 
-                // Render egui overlay
+                // Render egui overlay (not actually rendered to screen)
                 if let (Some(egui), Some(window)) = (&mut self.egui_renderer, &self.window) {
                     egui.begin_frame(window);
                     
@@ -312,11 +409,9 @@ impl ApplicationHandler for DemoApp {
                         });
                     
                     let _output = egui.end_frame(window);
-                    // Note: Full egui rendering would require additional Vulkan integration
-                    // For this demo, the egui output is not rendered to screen
                 }
+                let t3 = Instant::now();
                 
-                log::trace!("Checking resize...");
                 // Render simulation
                 if self.needs_resize {
                     if let Some(window) = &self.window {
@@ -333,17 +428,31 @@ impl ApplicationHandler for DemoApp {
                         log::error!("Render failed: {}", e);
                     }
                 }
+                let t4 = Instant::now();
+                
+                // Log step count periodically
+                if let Some(sim) = &self.simulation {
+                    if sim.step_count() > 0 && sim.step_count() % 10 == 0 {
+                        log::info!("Step {}: sim={:.1}ms tooltip={:.1}ms egui={:.1}ms render={:.1}ms total={:.1}ms",
+                            sim.step_count(),
+                            (t1-t0).as_secs_f64()*1000.0,
+                            (t2-t1).as_secs_f64()*1000.0,
+                            (t3-t2).as_secs_f64()*1000.0,
+                            (t4-t3).as_secs_f64()*1000.0,
+                            (t4-frame_start).as_secs_f64()*1000.0);
+                    }
+                }
                 
                 // Update timing
                 self.frame_count += 1;
-                self.last_frame = now;
+                self.last_frame = frame_start;
                 
                 // Update FPS counter
-                let fps_elapsed = now.duration_since(self.fps_update_time);
+                let fps_elapsed = frame_start.duration_since(self.fps_update_time);
                 if fps_elapsed >= Duration::from_secs(1) {
                     self.current_fps = self.frame_count as f64 / fps_elapsed.as_secs_f64();
                     self.frame_count = 0;
-                    self.fps_update_time = now;
+                    self.fps_update_time = frame_start;
                 }
                 
                 // Request next frame
@@ -354,6 +463,19 @@ impl ApplicationHandler for DemoApp {
             
             _ => {}
         }
+    }
+}
+
+impl Drop for DemoApp {
+    fn drop(&mut self) {
+        // Clean up render pipeline before render context is dropped
+        // Order matters: pipeline uses ctx's allocator
+        if let (Some(pipeline), Some(ctx)) = (self.render_pipeline.as_mut(), self.render_ctx.as_ref()) {
+            log::info!("Cleaning up render pipeline...");
+            pipeline.destroy(ctx);
+        }
+        // Now it's safe to drop the render_ctx and other resources
+        log::info!("Demo app cleanup complete");
     }
 }
 

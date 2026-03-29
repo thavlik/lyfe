@@ -35,6 +35,7 @@ pub mod sim;
 pub mod gpu;
 pub mod inspect;
 pub mod chemistry;
+pub mod coarse;
 
 pub use species::{SpeciesId, SpeciesRegistry};
 pub use grid::{Grid, CellCoord};
@@ -43,3 +44,4 @@ pub use scenario::{Scenario, ScenarioBuilder};
 pub use sim::{Simulation, SimulationConfig, RenderState};
 pub use inspect::{InspectionResult, CoarseCellCoord};
 pub use chemistry::{ChemicalEvolutionRule, NoOpEvolution};
+pub use coarse::{CoarseGrid, CoarseCellData};

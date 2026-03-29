@@ -6,6 +6,7 @@
 //! - Solid mask and material ID buffers
 //! - Compute pipeline for diffusion passes
 //! - Synchronization and buffer transfers
+//! - Coarse grid computation for async tooltip readback
 //!
 //! ## Buffer Layout
 //!
@@ -24,6 +25,8 @@ use gpu_allocator::MemoryLocation;
 use parking_lot::Mutex;
 
 use std::sync::Arc;
+
+use crate::coarse::CoarseGrid;
 
 /// Push constants for the diffusion compute shader.
 #[repr(C)]
@@ -149,6 +152,9 @@ pub struct GpuSimulation {
     pub command_pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
     pub fence: vk::Fence,
+    
+    // Coarse grid for async tooltip readback
+    pub coarse_grid: Option<CoarseGrid>,
 }
 
 impl GpuSimulation {
@@ -496,6 +502,23 @@ impl GpuSimulation {
             coeffs_buffer_size,
         );
 
+        // Create coarse grid for async tooltip readback (mip 8)
+        let coarse_grid = CoarseGrid::new(
+            device.clone(),
+            compute_queue,
+            compute_queue_family,
+            allocator.clone(),
+            width,
+            height,
+            species_count,
+            8, // mip factor
+            conc_buffer_a.buffer,
+            conc_buffer_b.buffer,
+            solid_mask.buffer,
+            conc_buffer_size,
+            mask_buffer_size,
+        ).ok(); // Don't fail if coarse grid creation fails
+
         Ok(Self {
             instance,
             physical_device,
@@ -523,6 +546,7 @@ impl GpuSimulation {
             command_pool,
             command_buffer,
             fence,
+            coarse_grid,
         })
     }
 
@@ -675,6 +699,35 @@ impl GpuSimulation {
             let workgroup_size = 256u32;
             let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
             self.device.cmd_dispatch(self.command_buffer, num_groups, self.species_count as u32, 1);
+
+            // Memory barrier before coarse grid computation
+            // Ensures diffusion writes complete before coarse reads
+            let buffer_barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .buffer(if self.current_buffer == 0 { self.conc_buffer_b.buffer } else { self.conc_buffer_a.buffer })
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[buffer_barrier],
+                &[],
+            );
+
+            // Run coarse grid computation (reads from destination buffer which will become current after swap)
+            // After diffusion: if current_buffer == 0, we wrote to B and will swap to 1 (B becomes current)
+            // So coarse grid should read from the buffer that will be current after swap
+            if let Some(ref coarse) = self.coarse_grid {
+                // After this step completes, current_buffer will have been swapped
+                // So coarse should read from 1 - current_buffer (the destination of diffusion)
+                let next_buffer = 1 - self.current_buffer;
+                coarse.record_compute(self.command_buffer, next_buffer);
+            }
 
             self.device.end_command_buffer(self.command_buffer)?;
 
