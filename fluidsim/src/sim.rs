@@ -682,6 +682,20 @@ impl Simulation {
         Ok(())
     }
 
+    pub fn remove_leak_channel(&mut self, index: usize) -> Result<LeakChannel> {
+        if index >= self.leak_channels.len() {
+            return Err(anyhow::anyhow!("Leak channel index {} out of range", index));
+        }
+
+        let removed = self.leak_channels.remove(index);
+        if let Err(error) = self.sync_leak_channels() {
+            self.leak_channels.insert(index, removed.clone());
+            return Err(error);
+        }
+
+        Ok(removed)
+    }
+
     fn sync_leak_channels(&mut self) -> Result<()> {
         let solid_mask = self.cached_solid_mask.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Solid mask cache is unavailable"))?;

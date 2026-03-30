@@ -135,6 +135,13 @@ struct PlacementState {
     leak_channel: LeakChannelDraft,
 }
 
+#[derive(Debug, Clone)]
+struct TransformState {
+    entity: SelectedEntity,
+    leak_channel: LeakChannelDraft,
+    mouse_offset: (i32, i32),
+}
+
 /// Which scenario to run.
 #[derive(Debug, Clone, Copy, Default)]
 enum ScenarioKind {
@@ -191,6 +198,7 @@ struct DemoApp {
     modifiers: ModifiersState,
     create_menu_open: bool,
     placement_state: Option<PlacementState>,
+    transform_state: Option<TransformState>,
     selected_entity: Option<SelectedEntity>,
     inspector_draft: Option<LeakChannelDraft>,
     inspector_dirty: bool,
@@ -230,6 +238,7 @@ impl DemoApp {
             modifiers: ModifiersState::empty(),
             create_menu_open: false,
             placement_state: None,
+            transform_state: None,
             selected_entity: None,
             inspector_draft: None,
             inspector_dirty: false,
@@ -357,6 +366,7 @@ impl DemoApp {
         self.hovered_leak_channel = None;
         self.create_menu_open = false;
         self.placement_state = None;
+        self.transform_state = None;
         self.selected_entity = None;
         self.inspector_draft = None;
         self.inspector_dirty = false;
@@ -415,6 +425,7 @@ impl DemoApp {
 
     fn begin_placing_entity(&mut self, kind: EntityKind) {
         self.create_menu_open = false;
+        self.transform_state = None;
         self.placement_state = Some(match kind {
             EntityKind::LeakChannel => PlacementState {
                 kind,
@@ -425,28 +436,74 @@ impl DemoApp {
 
     fn preview_leak_channel(&self) -> Option<fluidsim::LeakChannel> {
         let sim = self.simulation.as_ref()?;
-        let placement = self.placement_state.as_ref()?;
-        if placement.kind != EntityKind::LeakChannel {
-            return None;
-        }
+        let draft = if let Some(transform) = &self.transform_state {
+            if transform.entity != self.selected_entity? {
+                return None;
+            }
+            let mut draft = transform.leak_channel.clone();
+            let (mouse_x, mouse_y) = self.grid_position_from_mouse()?;
+            draft.x = (mouse_x + transform.mouse_offset.0).clamp(0, sim.dimensions().0.saturating_sub(1) as i32);
+            draft.y = (mouse_y + transform.mouse_offset.1).clamp(0, sim.dimensions().1.saturating_sub(1) as i32);
+            draft
+        } else {
+            let placement = self.placement_state.as_ref()?;
+            if placement.kind != EntityKind::LeakChannel {
+                return None;
+            }
 
-        let mut draft = placement.leak_channel.clone();
-        let (x, y) = self.grid_position_from_mouse()?;
-        draft.x = x;
-        draft.y = y;
+            let mut draft = placement.leak_channel.clone();
+            let (x, y) = self.grid_position_from_mouse()?;
+            draft.x = x;
+            draft.y = y;
+            draft
+        };
         draft.to_channel(sim).ok()
     }
 
     fn rotate_placement_entity(&mut self) {
-        if let Some(placement) = &mut self.placement_state {
+        if let Some(transform) = &mut self.transform_state {
+            if matches!(transform.entity, SelectedEntity::LeakChannel(_)) {
+                transform.leak_channel.rotate_eighth_turn();
+            }
+        } else if let Some(placement) = &mut self.placement_state {
             if placement.kind == EntityKind::LeakChannel {
                 placement.leak_channel.rotate_eighth_turn();
             }
         }
     }
 
+    fn begin_transform_selected_entity(&mut self) {
+        let Some(selection) = self.selected_entity else {
+            return;
+        };
+        let Some((mouse_x, mouse_y)) = self.grid_position_from_mouse() else {
+            return;
+        };
+        let Some(sim) = self.simulation.as_ref() else {
+            return;
+        };
+
+        let transform_state = match selection {
+            SelectedEntity::LeakChannel(index) => {
+                let Some(channel) = sim.leak_channels().get(index) else {
+                    return;
+                };
+                let draft = LeakChannelDraft::from_channel(channel, sim);
+                TransformState {
+                    entity: selection,
+                    mouse_offset: (draft.x - mouse_x, draft.y - mouse_y),
+                    leak_channel: draft,
+                }
+            }
+        };
+
+        self.placement_state = None;
+        self.transform_state = Some(transform_state);
+    }
+
     fn select_entity(&mut self, selection: Option<SelectedEntity>) {
         let _ = self.apply_selected_entity_changes(true);
+        self.transform_state = None;
         self.selected_entity = selection;
         self.inspector_dirty = false;
         self.inspector_error = None;
@@ -500,6 +557,27 @@ impl DemoApp {
     }
 
     fn handle_primary_click(&mut self) {
+        if self.transform_state.is_some() {
+            if let Some(selection) = self.selected_entity {
+                if let Some(channel) = self.preview_leak_channel() {
+                    if let Some(sim) = &mut self.simulation {
+                        match selection {
+                            SelectedEntity::LeakChannel(index) => match sim.update_leak_channel(index, channel) {
+                                Ok(()) => {
+                                    self.transform_state = None;
+                                    self.select_entity(Some(selection));
+                                }
+                                Err(error) => {
+                                    self.inspector_error = Some(error.to_string());
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         if self.placement_state.is_some() {
             if let Some(channel) = self.preview_leak_channel() {
                 if let Some(sim) = &mut self.simulation {
@@ -522,6 +600,28 @@ impl DemoApp {
             self.select_entity(Some(SelectedEntity::LeakChannel(index)));
         } else {
             self.select_entity(None);
+        }
+    }
+
+    fn delete_selected_entity(&mut self) {
+        let Some(selection) = self.selected_entity else {
+            return;
+        };
+
+        if let Some(sim) = &mut self.simulation {
+            let result = match selection {
+                SelectedEntity::LeakChannel(index) => sim.remove_leak_channel(index).map(|_| ()),
+            };
+
+            match result {
+                Ok(()) => {
+                    self.transform_state = None;
+                    self.select_entity(None);
+                }
+                Err(error) => {
+                    self.inspector_error = Some(error.to_string());
+                }
+            }
         }
     }
 
@@ -609,6 +709,24 @@ impl DemoApp {
                             ui.label(format!("Rate: {:.2}", placement.leak_channel.rate));
                             ui.label(format!("Rotation: {} deg", placement.leak_channel.rotation_degrees()));
                             ui.label("Click in the sim to place. Press r to rotate 45 deg.");
+                        });
+                });
+        }
+
+        if let Some(transform) = &self.transform_state {
+            egui::Area::new("entity_transform_status".into())
+                .anchor(Align2::LEFT_TOP, egui::vec2(12.0, if self.create_menu_open { 170.0 } else { 56.0 }))
+                .show(ctx, |ui| {
+                    Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 215))
+                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28)))
+                        .inner_margin(Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Transforming Leak Channel").strong());
+                            ui.label(format!("Species: {}", transform.leak_channel.species_name));
+                            ui.label(format!("Rate: {:.2}", transform.leak_channel.rate));
+                            ui.label(format!("Rotation: {} deg", transform.leak_channel.rotation_degrees()));
+                            ui.label("Move with the mouse, click to confirm, press r to rotate 45 deg.");
                         });
                 });
         }
@@ -1340,7 +1458,13 @@ impl ApplicationHandler for DemoApp {
                     Key::Named(NamedKey::Escape) => {
                         event_loop.exit();
                     }
-                    Key::Character(ref c) if (c == "r" || c == "R") && !self.modifiers.shift_key() && self.placement_state.is_some() => {
+                    Key::Named(NamedKey::Delete) => {
+                        self.delete_selected_entity();
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    Key::Character(ref c) if (c == "r" || c == "R") && !self.modifiers.shift_key() && (self.placement_state.is_some() || self.transform_state.is_some()) => {
                         self.rotate_placement_entity();
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -1365,6 +1489,12 @@ impl ApplicationHandler for DemoApp {
                             sim.set_inspection_mip(self.inspection_mip);
                         }
                         log::info!("Inspection mip: {}", self.inspection_mip);
+                    }
+                    Key::Character(ref c) if (c == "t" || c == "T") && self.selected_entity.is_some() => {
+                        self.begin_transform_selected_entity();
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
                     }
                     Key::Character(ref c) if c == "t" || c == "T" => {
                         self.thermal_view = true;
