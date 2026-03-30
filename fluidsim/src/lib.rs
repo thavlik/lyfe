@@ -43,11 +43,18 @@ pub mod coarse;
 pub mod semantic;
 pub mod kinetics_integration;
 pub mod leak;
+pub mod enzyme;
 
 pub use species::{SpeciesId, SpeciesRegistry};
 pub use grid::{Grid, CellCoord};
 pub use solid::{MaterialId, SolidCellMeta, SolidGeometry};
-pub use scenario::{Scenario, ScenarioBuilder, create_acid_base_scenario};
+pub use scenario::{
+	Scenario,
+	ScenarioBuilder,
+	create_acid_base_scenario,
+	create_catalyst_scenario,
+	create_enzyme_scenario,
+};
 pub use sim::{Simulation, SimulationConfig, RenderState};
 pub use gpu::{GpuRenderBuffers, SharedGpuContext};
 pub use inspect::{InspectionResult, CoarseCellCoord};
@@ -56,3 +63,4 @@ pub use coarse::{CoarseGrid, CoarseCellData};
 pub use semantic::{SemanticConfig, SemanticSnapshotBuilder};
 pub use kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
 pub use leak::LeakChannel;
+pub use enzyme::{EnzymeEntity, EnzymeField};

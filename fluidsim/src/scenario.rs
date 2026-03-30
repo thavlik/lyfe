@@ -4,6 +4,7 @@
 //! including species registration, solid geometry, and initial concentrations.
 
 use crate::grid::{Grid, CellCoord};
+use crate::enzyme::{EnzymeEntity, EnzymeField};
 use crate::leak::LeakChannel;
 use crate::solid::{MaterialId, MaterialRegistry, SolidGeometry};
 use crate::species::{SpeciesRegistry, SpeciesConcentrations};
@@ -20,6 +21,8 @@ pub struct Scenario {
     pub material_registry: MaterialRegistry,
     pub solid_geometry: SolidGeometry,
     pub leak_channels: Vec<LeakChannel>,
+    pub enzyme_entities: Vec<EnzymeEntity>,
+    pub enzyme_field: Option<EnzymeField>,
     /// Initial concentrations per cell. Sparse - only non-zero cells stored.
     pub initial_concentrations: AHashMap<usize, SpeciesConcentrations>,
     /// Initial temperature per cell in Kelvin. Dense array, one f32 per cell.
@@ -74,6 +77,8 @@ pub struct ScenarioBuilder {
     material_registry: MaterialRegistry,
     solid_geometry: SolidGeometry,
     leak_channels: Vec<LeakChannel>,
+    enzyme_entities: Vec<EnzymeEntity>,
+    enzyme_field: Option<EnzymeField>,
     initial_concentrations: AHashMap<usize, SpeciesConcentrations>,
     initial_temperatures: Vec<f32>,
 }
@@ -88,6 +93,8 @@ impl ScenarioBuilder {
             material_registry: MaterialRegistry::new(),
             solid_geometry: SolidGeometry::new(grid.cell_count()),
             leak_channels: Vec::new(),
+            enzyme_entities: Vec::new(),
+            enzyme_field: None,
             initial_concentrations: AHashMap::new(),
             initial_temperatures: Vec::new(),
         }
@@ -209,10 +216,52 @@ impl ScenarioBuilder {
             material_registry: self.material_registry,
             solid_geometry: self.solid_geometry,
             leak_channels: self.leak_channels,
+            enzyme_entities: self.enzyme_entities,
+            enzyme_field: self.enzyme_field,
             initial_concentrations: self.initial_concentrations,
             initial_temperatures: temperatures,
         }
     }
+}
+
+fn central_box_bounds(width: u32, height: u32) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
+    let wall_thickness = 4u32;
+    let inner_size = (width.min(height) / 2).max(64);
+    let outer_size = inner_size + 2 * wall_thickness;
+
+    let center_x = width / 2;
+    let center_y = height / 2;
+
+    let outer_x0 = center_x - outer_size / 2;
+    let outer_y0 = center_y - outer_size / 2;
+    let outer_x1 = outer_x0 + outer_size;
+    let outer_y1 = outer_y0 + outer_size;
+
+    let inner_x0 = outer_x0 + wall_thickness;
+    let inner_y0 = outer_y0 + wall_thickness;
+    let inner_x1 = outer_x1 - wall_thickness;
+    let inner_y1 = outer_y1 - wall_thickness;
+
+    (
+        wall_thickness,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        inner_x0,
+        inner_y0,
+        inner_x1,
+        inner_y1,
+    )
+}
+
+fn lcg_next(seed: &mut u32) -> u32 {
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    *seed
+}
+
+fn lcg_unit(seed: &mut u32) -> f32 {
+    (lcg_next(seed) >> 8) as f32 / ((u32::MAX >> 8) as f32)
 }
 
 /// Create the demo scenario as specified in requirements.
@@ -395,27 +444,13 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
     builder.build()
 }
 
-/// Create an enzyme-catalyzed phosphorylation scenario.
+/// Create a catalyst-gated phosphorylation scenario.
 ///
 /// Uses the same hollow-box geometry as the basic demo, but fills the entire
 /// interior with glucose, ATP, and a low concentration of hexokinase.
-pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
-    let wall_thickness = 4u32;
-    let inner_size = (width.min(height) / 2).max(64);
-    let outer_size = inner_size + 2 * wall_thickness;
-
-    let center_x = width / 2;
-    let center_y = height / 2;
-
-    let outer_x0 = center_x - outer_size / 2;
-    let outer_y0 = center_y - outer_size / 2;
-    let outer_x1 = outer_x0 + outer_size;
-    let outer_y1 = outer_y0 + outer_size;
-
-    let inner_x0 = outer_x0 + wall_thickness;
-    let inner_y0 = outer_y0 + wall_thickness;
-    let inner_x1 = outer_x1 - wall_thickness;
-    let inner_y1 = outer_y1 - wall_thickness;
+pub fn create_catalyst_scenario(width: u32, height: u32) -> Scenario {
+    let (wall_thickness, outer_x0, outer_y0, outer_x1, outer_y1, inner_x0, inner_y0, inner_x1, inner_y1) =
+        central_box_bounds(width, height);
 
     let builder = ScenarioBuilder::new(width, height)
         .register_species("Glucose")
@@ -465,6 +500,112 @@ pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
         }
     }
 
+    builder.build()
+}
+
+/// Create an enzyme-entity phosphorylation scenario.
+///
+/// Starts from the catalyst demo chemistry and geometry, but models
+/// hexokinase as six drifting entities rather than a dissolved catalyst.
+pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
+    let (wall_thickness, outer_x0, outer_y0, outer_x1, outer_y1, inner_x0, inner_y0, inner_x1, inner_y1) =
+        central_box_bounds(width, height);
+
+    let builder = ScenarioBuilder::new(width, height)
+        .register_species("Glucose")
+        .register_species("ATP")
+        .register_species("ADP")
+        .register_species("G6P");
+
+    let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
+    let builder = builder.fill_hollow_rect(
+        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+    );
+    let mut builder = builder.fill_temperature(293.15);
+
+    let glucose_id = builder.species_registry.id_of("Glucose").unwrap();
+    let atp_id = builder.species_registry.id_of("ATP").unwrap();
+
+    let inner_width = (inner_x1 - inner_x0) as f32;
+    let inner_height = (inner_y1 - inner_y0) as f32;
+    let cool_temperature = 293.15;
+    let hot_temperature = cool_temperature + 15.0;
+
+    for y in inner_y0..inner_y1 {
+        for x in inner_x0..inner_x1 {
+            let index = builder.grid.index_of(CellCoord::new(x, y));
+            if builder.solid_geometry.is_solid(index) {
+                continue;
+            }
+
+            builder.initial_concentrations
+                .entry(index)
+                .or_default()
+                .set(glucose_id, 1.0);
+            builder.initial_concentrations
+                .entry(index)
+                .or_default()
+                .set(atp_id, 1.0);
+
+            let nx = (x - inner_x0) as f32 / inner_width;
+            let ny = (y - inner_y0) as f32 / inner_height;
+            builder.initial_temperatures[index] = if nx + ny < 1.0 {
+                hot_temperature
+            } else {
+                cool_temperature
+            };
+        }
+    }
+
+    let entity_margin = 10.0;
+    let field = EnzymeField {
+        min_x: inner_x0 as f32 + entity_margin,
+        min_y: inner_y0 as f32 + entity_margin,
+        max_x: inner_x1 as f32 - entity_margin,
+        max_y: inner_y1 as f32 - entity_margin,
+        hot_temperature,
+        cool_temperature,
+        circulation_strength: 1.35,
+        thermophoretic_strength: 0.55,
+        brownian_strength: 0.95,
+        rotational_diffusion: 0.75,
+    };
+
+    let mut seed = width.wrapping_mul(73_856_093) ^ height.wrapping_mul(19_349_663) ^ 0xA5A5_1F1Fu32;
+    let mut entities = Vec::with_capacity(6);
+    let minimum_spacing = 14.0f32;
+
+    for entity_index in 0..6 {
+        let mut candidate = glam::Vec2::new(field.min_x, field.min_y);
+        for _ in 0..96 {
+            candidate = glam::Vec2::new(
+                field.min_x + lcg_unit(&mut seed) * (field.max_x - field.min_x),
+                field.min_y + lcg_unit(&mut seed) * (field.max_y - field.min_y),
+            );
+            if entities.iter().all(|existing: &EnzymeEntity| {
+                existing.position().distance(candidate) >= minimum_spacing
+            }) {
+                break;
+            }
+        }
+
+        let rotation_radians = lcg_unit(&mut seed) * std::f32::consts::TAU;
+        let catalytic_scale = 0.85 + 0.35 * lcg_unit(&mut seed);
+        let mobility_scale = 0.8 + 0.45 * lcg_unit(&mut seed);
+        let thermal_bias = -1.5 + 3.0 * lcg_unit(&mut seed);
+        entities.push(EnzymeEntity::new(
+            candidate.x,
+            candidate.y,
+            rotation_radians,
+            catalytic_scale,
+            mobility_scale,
+            thermal_bias,
+            seed ^ (entity_index as u32).wrapping_mul(0x9E37_79B9),
+        ));
+    }
+
+    builder.enzyme_entities = entities;
+    builder.enzyme_field = Some(field);
     builder.build()
 }
 

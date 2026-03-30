@@ -149,6 +149,7 @@ enum ScenarioKind {
     Basic,
     AcidBase,
     Buffers,
+    Catalyst,
     Enzyme,
     Leak,
 }
@@ -172,7 +173,9 @@ enum Commands {
     AcidBase,
     /// Weak-acid buffer vs NaOH with acetic-acid equilibrium
     Buffers,
-    /// Enzyme-catalyzed phosphorylation: Glucose + ATP -> G6P + ADP
+    /// Dissolved catalyst phosphorylation: Glucose + ATP -> G6P + ADP
+    Catalyst,
+    /// Moving enzyme phosphorylation: Glucose + ATP -> G6P + ADP
     Enzyme,
     /// Buffer scenario with membrane leak channels for K+ and Na+
     Leak,
@@ -345,6 +348,7 @@ impl DemoApp {
             ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, context)?,
             ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, context)?,
             ScenarioKind::Buffers => Simulation::new_buffers_with_shared_gpu_context(config, context)?,
+            ScenarioKind::Catalyst => Simulation::new_catalyst_with_shared_gpu_context(config, context)?,
             ScenarioKind::Enzyme => Simulation::new_enzyme_with_shared_gpu_context(config, context)?,
             ScenarioKind::Leak => Simulation::new_leak_with_shared_gpu_context(config, context)?,
         };
@@ -979,6 +983,101 @@ impl DemoApp {
             grid_x * logical_w / grid_w as f32,
             grid_y * logical_h / grid_h as f32,
         ))
+    }
+
+    fn grid_to_screen_scale(&self) -> Option<(f32, f32)> {
+        let sim = self.simulation.as_ref()?;
+        let window = self.window.as_ref()?;
+        let (grid_w, grid_h) = sim.dimensions();
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let logical_w = size.width as f32 / scale;
+        let logical_h = size.height as f32 / scale;
+        Some((logical_w / grid_w as f32, logical_h / grid_h as f32))
+    }
+
+    fn draw_enzymes(&self, ctx: &egui::Context) {
+        let Some(sim) = self.simulation.as_ref() else { return; };
+        if sim.enzyme_entities().is_empty() {
+            return;
+        }
+        let Some((scale_x, scale_y)) = self.grid_to_screen_scale() else { return; };
+
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("enzyme_entities"),
+        ));
+
+        for entity in sim.enzyme_entities() {
+            let Some(center) = self.grid_to_screen(entity.x, entity.y) else {
+                continue;
+            };
+            let Some(active_site) = self.grid_to_screen(
+                entity.active_site_position().x,
+                entity.active_site_position().y,
+            ) else {
+                continue;
+            };
+
+            let half_width = fluidsim::EnzymeEntity::BODY_HALF_WIDTH * entity.mobility_scale * scale_x;
+            let half_height = fluidsim::EnzymeEntity::BODY_HALF_HEIGHT * entity.catalytic_scale * scale_y;
+            let (sin_theta, cos_theta) = entity.rotation_radians.sin_cos();
+            let rotation = egui::emath::Rot2::from_angle(entity.rotation_radians);
+
+            let mut shell = Vec::with_capacity(24);
+            for step in 0..24 {
+                let angle = step as f32 / 24.0 * std::f32::consts::TAU;
+                let bean = 1.0 + 0.12 * (angle * 2.0).sin() - 0.08 * (angle * 3.0 + 0.35).cos();
+                let local = egui::vec2(
+                    half_width * bean * angle.cos(),
+                    half_height * (0.92 + 0.08 * angle.sin()) * angle.sin(),
+                );
+                shell.push(center + rotation * local);
+            }
+
+            let shadow: Vec<_> = shell.iter()
+                .map(|point| *point + egui::vec2(5.0, 6.0))
+                .collect();
+            painter.add(egui::Shape::convex_polygon(
+                shadow,
+                egui::Color32::from_rgba_unmultiplied(18, 26, 34, 72),
+                egui::Stroke::NONE,
+            ));
+
+            painter.add(egui::Shape::convex_polygon(
+                shell,
+                egui::Color32::from_rgb(222, 194, 132),
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(92, 54, 24)),
+            ));
+
+            let stripe_dir = egui::vec2(cos_theta * half_width * 0.45, sin_theta * half_width * 0.45);
+            let stripe_normal = egui::vec2(-sin_theta * half_height * 0.38, cos_theta * half_height * 0.38);
+            painter.line_segment(
+                [center - stripe_dir + stripe_normal, center + stripe_dir + stripe_normal],
+                egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(255, 240, 206, 210)),
+            );
+            painter.line_segment(
+                [center - stripe_dir - stripe_normal, center + stripe_dir - stripe_normal],
+                egui::Stroke::new(1.6, egui::Color32::from_rgba_unmultiplied(184, 126, 68, 180)),
+            );
+
+            let pocket_radius = 0.55 * half_height.max(4.0);
+            painter.circle_filled(
+                active_site,
+                pocket_radius * 1.35,
+                egui::Color32::from_rgba_unmultiplied(80, 122, 164, 80),
+            );
+            painter.circle_filled(
+                active_site,
+                pocket_radius,
+                egui::Color32::from_rgb(108, 168, 214),
+            );
+            painter.circle_stroke(
+                active_site,
+                pocket_radius,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(232, 248, 255)),
+            );
+        }
     }
 
     fn leak_channel_overlays(&self) -> Vec<LeakChannelOverlay> {
@@ -1631,6 +1730,7 @@ impl ApplicationHandler for DemoApp {
                     if let Some(rect) = hovered_coarse_rect {
                         Self::draw_hovered_coarse_outline(&egui_ctx, rect);
                     }
+                    self.draw_enzymes(&egui_ctx);
                     Self::draw_leak_channels(&egui_ctx, &leak_channel_overlays);
                     
                     // Show tooltip near mouse
@@ -1827,6 +1927,7 @@ fn main() -> Result<()> {
     let scenario = match cli.command {
         Some(Commands::AcidBase) => ScenarioKind::AcidBase,
         Some(Commands::Buffers) => ScenarioKind::Buffers,
+        Some(Commands::Catalyst) => ScenarioKind::Catalyst,
         Some(Commands::Enzyme) => ScenarioKind::Enzyme,
         Some(Commands::Leak) => ScenarioKind::Leak,
         Some(Commands::Basic) | None => ScenarioKind::Basic,

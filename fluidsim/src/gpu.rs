@@ -27,6 +27,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 use crate::coarse::CoarseGrid;
+use crate::enzyme::EnzymeEntity;
 use crate::leak::LeakChannel;
 use crate::species::SpeciesRegistry;
 
@@ -92,6 +93,19 @@ pub struct LeakPushConstants {
     pub _pad: [u32; 3],
 }
 
+/// Push constants for the enzyme-entity compute shader.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct EnzymePushConstants {
+    pub width: u32,
+    pub height: u32,
+    pub species_count: u32,
+    pub num_enzymes: u32,
+    pub dt: f32,
+    pub base_turnover_rate: f32,
+    pub _pad: [u32; 2],
+}
+
 /// Push constants for the thermal diffusion compute shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -144,6 +158,21 @@ pub struct GpuLeakChannel {
     pub _pad: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuEnzymeEntity {
+    pub active_site_x: i32,
+    pub active_site_y: i32,
+    pub glucose_index: u32,
+    pub atp_index: u32,
+    pub g6p_index: u32,
+    pub adp_index: u32,
+    pub catalytic_scale: f32,
+    pub thermal_bias: f32,
+    pub km_glucose: f32,
+    pub km_atp: f32,
+}
+
 impl GpuReactionRule {
     pub const NONE: u32 = u32::MAX;
 
@@ -179,6 +208,7 @@ impl GpuReactionRule {
 /// Maximum number of reaction rules the GPU buffer can hold.
 const MAX_REACTION_RULES: usize = 16;
 const MAX_LEAK_CHANNELS: usize = 32;
+const MAX_ENZYME_ENTITIES: usize = 32;
 
 /// Optional reaction pipeline state.
 /// Created lazily when reaction rules are first uploaded.
@@ -215,6 +245,17 @@ pub struct LeakPipelineState {
     pub leak_descriptor_sets: Vec<vk::DescriptorSet>,
     pub channels_buffer: GpuBuffer,
     pub active_channel_count: u32,
+}
+
+pub struct EnzymePipelineState {
+    pub enzyme_descriptor_set_layout: vk::DescriptorSetLayout,
+    pub enzyme_pipeline_layout: vk::PipelineLayout,
+    pub enzyme_pipeline: vk::Pipeline,
+    pub enzyme_descriptor_pool: vk::DescriptorPool,
+    /// Four descriptor sets: concentration current buffer × temperature current buffer.
+    pub enzyme_descriptor_sets: Vec<vk::DescriptorSet>,
+    pub enzymes_buffer: GpuBuffer,
+    pub active_enzyme_count: u32,
 }
 
 /// A GPU buffer with its allocation.
@@ -337,6 +378,7 @@ pub struct GpuSimulation {
     // Reaction pipeline (created lazily when rules are first uploaded)
     pub reaction: Option<ReactionPipelineState>,
     pub leak: Option<LeakPipelineState>,
+    pub enzyme: Option<EnzymePipelineState>,
 }
 
 impl GpuSimulation {
@@ -371,6 +413,41 @@ impl GpuSimulation {
         }
 
         Ok(packed_channels)
+    }
+
+    fn pack_enzyme_entities(
+        &self,
+        entities: &[EnzymeEntity],
+        species_registry: &SpeciesRegistry,
+    ) -> Result<Vec<GpuEnzymeEntity>> {
+        if entities.len() > MAX_ENZYME_ENTITIES {
+            bail!("Too many enzyme entities: {} > {}", entities.len(), MAX_ENZYME_ENTITIES);
+        }
+
+        let glucose_index = species_registry.index_of_name("Glucose")
+            .context("Enzyme scenario is missing Glucose")? as u32;
+        let atp_index = species_registry.index_of_name("ATP")
+            .context("Enzyme scenario is missing ATP")? as u32;
+        let g6p_index = species_registry.index_of_name("G6P")
+            .context("Enzyme scenario is missing G6P")? as u32;
+        let adp_index = species_registry.index_of_name("ADP")
+            .context("Enzyme scenario is missing ADP")? as u32;
+
+        Ok(entities.iter().map(|entity| {
+            let (active_site_x, active_site_y) = entity.active_site_cell();
+            GpuEnzymeEntity {
+                active_site_x,
+                active_site_y,
+                glucose_index,
+                atp_index,
+                g6p_index,
+                adp_index,
+                catalytic_scale: entity.catalytic_scale,
+                thermal_bias: entity.thermal_bias,
+                km_glucose: 0.12,
+                km_atp: 0.08,
+            }
+        }).collect())
     }
 
     /// Create a new GPU simulation context.
@@ -938,6 +1015,7 @@ impl GpuSimulation {
             coarse_grid,
             reaction: None,
             leak: None,
+            enzyme: None,
         })
     }
 
@@ -1311,6 +1389,50 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
+    fn update_enzyme_descriptor_set(
+        device: &ash::Device,
+        set: vk::DescriptorSet,
+        conc_buffer: vk::Buffer,
+        temperature_buffer: vk::Buffer,
+        enzymes_buffer: vk::Buffer,
+        conc_size: u64,
+        temperature_size: u64,
+        enzymes_size: u64,
+    ) {
+        let conc_info = [vk::DescriptorBufferInfo::default()
+            .buffer(conc_buffer)
+            .offset(0)
+            .range(conc_size)];
+        let temp_info = [vk::DescriptorBufferInfo::default()
+            .buffer(temperature_buffer)
+            .offset(0)
+            .range(temperature_size)];
+        let enzyme_info = [vk::DescriptorBufferInfo::default()
+            .buffer(enzymes_buffer)
+            .offset(0)
+            .range(enzymes_size)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&conc_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&temp_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&enzyme_info),
+        ];
+
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+    }
+
     fn current_concentration_buffer_handle(&self) -> vk::Buffer {
         if self.current_buffer == 0 {
             self.conc_buffer_a.buffer
@@ -1405,6 +1527,37 @@ impl GpuSimulation {
 
             let workgroup_size = 64u32;
             let num_groups = (push_constants.num_channels + workgroup_size - 1) / workgroup_size;
+            self.device.cmd_dispatch(cmd, num_groups.max(1), 1, 1);
+        }
+    }
+
+    fn record_enzyme_dispatch(
+        &self,
+        cmd: vk::CommandBuffer,
+        enzyme: &EnzymePipelineState,
+        descriptor_set: vk::DescriptorSet,
+        push_constants: &EnzymePushConstants,
+    ) {
+        unsafe {
+            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, enzyme.enzyme_pipeline);
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                enzyme.enzyme_pipeline_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                enzyme.enzyme_pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(push_constants),
+            );
+
+            let workgroup_size = 64u32;
+            let num_groups = (push_constants.num_enzymes + workgroup_size - 1) / workgroup_size;
             self.device.cmd_dispatch(cmd, num_groups.max(1), 1, 1);
         }
     }
@@ -1577,6 +1730,16 @@ impl GpuSimulation {
                     .size(vk::WHOLE_SIZE),
             );
         }
+        if let Some(enzyme) = self.enzyme.as_ref() {
+            input_barriers.push(
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .buffer(enzyme.enzymes_buffer.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+            );
+        }
 
         unsafe {
             self.device.cmd_pipeline_barrier(
@@ -1665,6 +1828,25 @@ impl GpuSimulation {
                     };
                     let leak_descriptor_set = leak.leak_descriptor_sets[self.current_buffer];
                     self.record_leak_dispatch(cmd, leak, leak_descriptor_set, &leak_push);
+                    self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
+                }
+            }
+
+            if let Some(enzyme) = self.enzyme.as_ref() {
+                if enzyme.active_enzyme_count > 0 {
+                    let enzyme_push = EnzymePushConstants {
+                        width: self.width,
+                        height: self.height,
+                        species_count: self.species_count as u32,
+                        num_enzymes: enzyme.active_enzyme_count,
+                        dt: reaction_substep_dt,
+                        base_turnover_rate: 0.22,
+                        _pad: [0; 2],
+                    };
+                    let enzyme_descriptor_set = enzyme.enzyme_descriptor_sets[
+                        Self::reaction_descriptor_index(self.current_buffer, temperature_current_buffer)
+                    ];
+                    self.record_enzyme_dispatch(cmd, enzyme, enzyme_descriptor_set, &enzyme_push);
                     self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
                 }
             }
@@ -2723,6 +2905,214 @@ impl GpuSimulation {
         Ok(())
     }
 
+    pub fn init_enzyme_pipeline(
+        &mut self,
+        entities: &[EnzymeEntity],
+        species_registry: &SpeciesRegistry,
+    ) -> Result<()> {
+        if entities.is_empty() {
+            return Ok(());
+        }
+        if self.enzyme.is_some() {
+            return Ok(());
+        }
+
+        let (temperature_buffer_a, temperature_buffer_b) = {
+            let rxn = self.reaction.as_ref().context("Reaction pipeline must be initialized before enzyme pipeline")?;
+            (rxn.temperature_buffer_a.buffer, rxn.temperature_buffer_b.buffer)
+        };
+        let packed_enzymes = self.pack_enzyme_entities(entities, species_registry)?;
+
+        let enzymes_buffer_size = (MAX_ENZYME_ENTITIES * std::mem::size_of::<GpuEnzymeEntity>()) as u64;
+        let conc_buffer_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
+        let temp_buffer_size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
+
+        let mut alloc = self.allocator.as_ref().unwrap().lock();
+        let enzymes_buffer = GpuBuffer::new(
+            &self.device,
+            &mut alloc,
+            enzymes_buffer_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuOnly,
+            "enzyme_entities",
+        )?;
+        drop(alloc);
+
+        self.staging_buffer.write(&packed_enzymes)?;
+        Self::copy_buffer_sync(
+            &self.device,
+            self.command_pool,
+            self.compute_queue,
+            self.fence,
+            self.staging_buffer.buffer,
+            enzymes_buffer.buffer,
+            (packed_enzymes.len() * std::mem::size_of::<GpuEnzymeEntity>()) as u64,
+            Some(self.command_buffer),
+        )?;
+
+        let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
+        let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
+        options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+        options.set_optimization_level(shaderc::OptimizationLevel::Performance);
+
+        let enzyme_spirv = compiler.compile_into_spirv(
+            include_str!("../shaders/enzyme.comp"),
+            shaderc::ShaderKind::Compute,
+            "enzyme.comp",
+            "main",
+            Some(&options),
+        ).context("Failed to compile enzyme shader")?;
+
+        let enzyme_shader_module_info = vk::ShaderModuleCreateInfo::default()
+            .code(enzyme_spirv.as_binary());
+        let enzyme_shader_module = unsafe {
+            self.device.create_shader_module(&enzyme_shader_module_info, None)?
+        };
+
+        let enzyme_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let enzyme_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&enzyme_bindings);
+        let enzyme_descriptor_set_layout = unsafe {
+            self.device.create_descriptor_set_layout(&enzyme_layout_info, None)?
+        };
+
+        let push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(std::mem::size_of::<EnzymePushConstants>() as u32);
+        let enzyme_pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&enzyme_descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+        let enzyme_pipeline_layout = unsafe {
+            self.device.create_pipeline_layout(&enzyme_pipeline_layout_info, None)?
+        };
+
+        let entry_name = c"main";
+        let stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(enzyme_shader_module)
+            .name(entry_name);
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage_info)
+            .layout(enzyme_pipeline_layout);
+        let enzyme_pipeline = unsafe {
+            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|e| anyhow::anyhow!("Failed to create enzyme pipeline: {:?}", e.1))?[0]
+        };
+
+        unsafe {
+            self.device.destroy_shader_module(enzyme_shader_module, None);
+        }
+
+        let pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(12)];
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(4)
+            .pool_sizes(&pool_sizes);
+        let enzyme_descriptor_pool = unsafe {
+            self.device.create_descriptor_pool(&pool_info, None)?
+        };
+
+        let layouts = [
+            enzyme_descriptor_set_layout,
+            enzyme_descriptor_set_layout,
+            enzyme_descriptor_set_layout,
+            enzyme_descriptor_set_layout,
+        ];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(enzyme_descriptor_pool)
+            .set_layouts(&layouts);
+        let enzyme_descriptor_sets = unsafe {
+            self.device.allocate_descriptor_sets(&alloc_info)?
+        };
+
+        for conc_current_buffer in 0..2 {
+            for temp_current_buffer in 0..2 {
+                let descriptor_index = Self::reaction_descriptor_index(conc_current_buffer, temp_current_buffer);
+                let conc_buffer = if conc_current_buffer == 0 {
+                    self.conc_buffer_a.buffer
+                } else {
+                    self.conc_buffer_b.buffer
+                };
+                let temp_buffer = if temp_current_buffer == 0 {
+                    temperature_buffer_a
+                } else {
+                    temperature_buffer_b
+                };
+                Self::update_enzyme_descriptor_set(
+                    &self.device,
+                    enzyme_descriptor_sets[descriptor_index],
+                    conc_buffer,
+                    temp_buffer,
+                    enzymes_buffer.buffer,
+                    conc_buffer_size,
+                    temp_buffer_size,
+                    enzymes_buffer_size,
+                );
+            }
+        }
+
+        self.enzyme = Some(EnzymePipelineState {
+            enzyme_descriptor_set_layout,
+            enzyme_pipeline_layout,
+            enzyme_pipeline,
+            enzyme_descriptor_pool,
+            enzyme_descriptor_sets,
+            enzymes_buffer,
+            active_enzyme_count: packed_enzymes.len() as u32,
+        });
+
+        Ok(())
+    }
+
+    pub fn upload_enzyme_entities(
+        &mut self,
+        entities: &[EnzymeEntity],
+        species_registry: &SpeciesRegistry,
+    ) -> Result<()> {
+        if self.enzyme.is_none() {
+            return self.init_enzyme_pipeline(entities, species_registry);
+        }
+
+        let packed_enzymes = self.pack_enzyme_entities(entities, species_registry)?;
+        let enzyme = self.enzyme.as_mut().unwrap();
+        enzyme.active_enzyme_count = packed_enzymes.len() as u32;
+
+        if packed_enzymes.is_empty() {
+            return Ok(());
+        }
+
+        self.staging_buffer.write(&packed_enzymes)?;
+        Self::copy_buffer_sync(
+            &self.device,
+            self.command_pool,
+            self.compute_queue,
+            self.fence,
+            self.staging_buffer.buffer,
+            enzyme.enzymes_buffer.buffer,
+            (packed_enzymes.len() * std::mem::size_of::<GpuEnzymeEntity>()) as u64,
+            Some(self.command_buffer),
+        )?;
+
+        Ok(())
+    }
+
     /// Run one thermal diffusion step on the current temperature buffer.
     pub fn step_temperature(&mut self, dt: f32, thermal_diffusivity: f32) -> Result<()> {
         let rxn = match &mut self.reaction {
@@ -2838,6 +3228,19 @@ impl Drop for GpuSimulation {
                 drop(alloc);
             }
             log::info!("GpuSimulation::drop - leak pipeline dropped");
+
+            if let Some(mut enzyme) = self.enzyme.take() {
+                self.device.destroy_descriptor_pool(enzyme.enzyme_descriptor_pool, None);
+                self.device.destroy_pipeline(enzyme.enzyme_pipeline, None);
+                self.device.destroy_pipeline_layout(enzyme.enzyme_pipeline_layout, None);
+                self.device.destroy_descriptor_set_layout(enzyme.enzyme_descriptor_set_layout, None);
+
+                let mut alloc = self.allocator.as_ref().unwrap().lock();
+                self.device.destroy_buffer(enzyme.enzymes_buffer.buffer, None);
+                alloc.free(std::mem::take(&mut enzyme.enzymes_buffer.allocation)).ok();
+                drop(alloc);
+            }
+            log::info!("GpuSimulation::drop - enzyme pipeline dropped");
 
             self.device.destroy_descriptor_pool(self.charge_descriptor_pool, None);
             self.device.destroy_pipeline(self.charge_projection_pipeline, None);

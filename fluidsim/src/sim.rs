@@ -6,12 +6,13 @@
 
 use crate::chemistry::{ChemicalEvolutionRule, NoOpEvolution};
 use crate::coarse::CoarseCellData;
+use crate::enzyme::{EnzymeEntity, EnzymeField};
 use crate::gpu::{GpuRenderBuffers, GpuSimulation, SharedGpuContext};
 use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
 use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
 use crate::leak::LeakChannel;
-use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario, create_enzyme_scenario, create_leak_scenario};
+use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario, create_catalyst_scenario, create_enzyme_scenario, create_leak_scenario};
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
@@ -92,6 +93,7 @@ pub struct RenderState {
 pub struct PreparedSimulationStep {
     substeps: u32,
     substep_dt: f32,
+    sim_dt: f32,
     diffusion_rate: f32,
     charge_correction_strength: f32,
     reaction_dt: f32,
@@ -114,6 +116,10 @@ pub struct Simulation {
     evolution_rule: Box<dyn ChemicalEvolutionRule>,
     /// Leak channels embedded in the current scenario.
     leak_channels: Vec<LeakChannel>,
+    /// Enzyme entities embedded in the current scenario.
+    enzyme_entities: Vec<EnzymeEntity>,
+    /// Motion heuristics for the enzyme field.
+    enzyme_field: Option<EnzymeField>,
     /// Configuration
     config: SimulationConfig,
     /// Cached concentration data for inspection
@@ -211,6 +217,9 @@ impl Simulation {
         if !scenario.leak_channels.is_empty() {
             gpu.init_leak_pipeline(&scenario.leak_channels, &scenario.species_registry, &solid_mask)?;
         }
+        if !scenario.enzyme_entities.is_empty() {
+            gpu.init_enzyme_pipeline(&scenario.enzyme_entities, &scenario.species_registry)?;
+        }
         let runtime_readbacks_enabled = !gpu.uses_shared_vulkan_context();
         let inspection_readbacks_enabled = true;
         let reaction_rate_scale = config.reaction_rate_scale;
@@ -223,6 +232,8 @@ impl Simulation {
             inspector: Inspector::new(config.inspection_mip),
             evolution_rule: Box::new(NoOpEvolution),
             leak_channels: scenario.leak_channels,
+            enzyme_entities: scenario.enzyme_entities,
+            enzyme_field: scenario.enzyme_field,
             config,
             cached_concentrations: Some(concentrations.clone()),
             cached_solid_mask: Some(solid_mask.clone()),
@@ -351,7 +362,18 @@ impl Simulation {
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
 
-    /// Create the enzyme-catalyzed phosphorylation simulation.
+    /// Create the dissolved-catalyst phosphorylation simulation.
+    pub fn new_catalyst(config: SimulationConfig) -> Result<Self> {
+        let scenario = create_catalyst_scenario(config.width, config.height);
+        Self::from_scenario(scenario, config)
+    }
+
+    pub fn new_catalyst_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+        let scenario = create_catalyst_scenario(config.width, config.height);
+        Self::from_scenario_with_shared_gpu_context(scenario, config, context)
+    }
+
+    /// Create the enzyme-entity phosphorylation simulation.
     pub fn new_enzyme(config: SimulationConfig) -> Result<Self> {
         let scenario = create_enzyme_scenario(config.width, config.height);
         Self::from_scenario(scenario, config)
@@ -382,6 +404,8 @@ impl Simulation {
         let Some(step) = self.prepare_frame_step(dt) else {
             return Ok(());
         };
+
+        self.prepare_dynamic_entities(step.sim_dt)?;
 
         self.gpu.step_frame(
             step.substeps,
@@ -440,6 +464,7 @@ impl Simulation {
         Some(PreparedSimulationStep {
             substeps,
             substep_dt,
+            sim_dt: dt_sim,
             diffusion_rate: self.config.diffusion_rate,
             charge_correction_strength: effective_charge_correction_strength(
                 self.config.charge_correction_strength,
@@ -450,7 +475,8 @@ impl Simulation {
         })
     }
 
-    pub fn record_prepared_step(&mut self, cmd: vk::CommandBuffer, step: PreparedSimulationStep) {
+    pub fn record_prepared_step(&mut self, cmd: vk::CommandBuffer, step: PreparedSimulationStep) -> Result<()> {
+        self.prepare_dynamic_entities(step.sim_dt)?;
         self.gpu.record_step_frame(
             cmd,
             step.substeps,
@@ -460,6 +486,22 @@ impl Simulation {
             step.reaction_dt,
             step.thermal_diffusivity,
         );
+        Ok(())
+    }
+
+    fn prepare_dynamic_entities(&mut self, sim_dt: f32) -> Result<()> {
+        let Some(field) = self.enzyme_field else {
+            return Ok(());
+        };
+        if self.enzyme_entities.is_empty() {
+            return Ok(());
+        }
+
+        for entity in &mut self.enzyme_entities {
+            entity.advance(sim_dt, &field);
+        }
+
+        self.sync_enzyme_entities()
     }
 
     pub fn finalize_completed_frame(&mut self) -> Result<()> {
@@ -637,6 +679,14 @@ impl Simulation {
         &self.leak_channels
     }
 
+    pub fn enzyme_entities(&self) -> &[EnzymeEntity] {
+        &self.enzyme_entities
+    }
+
+    pub fn enzyme_field(&self) -> Option<&EnzymeField> {
+        self.enzyme_field.as_ref()
+    }
+
     pub fn hovered_leak_channel(&self, grid_x: f32, grid_y: f32) -> Option<usize> {
         self.leak_channels.iter().position(|channel| {
             channel.contains_grid_point(grid_x, grid_y, 3.2, 1.8)
@@ -711,6 +761,10 @@ impl Simulation {
         let solid_mask = self.cached_solid_mask.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Solid mask cache is unavailable"))?;
         self.gpu.upload_leak_channels(&self.leak_channels, &self.species_registry, solid_mask)
+    }
+
+    fn sync_enzyme_entities(&mut self) -> Result<()> {
+        self.gpu.upload_enzyme_entities(&self.enzyme_entities, &self.species_registry)
     }
 
     /// Get the current simulation time.

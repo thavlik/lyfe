@@ -1,0 +1,87 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct GpuEnzymeEntity {
+    int active_site_x;
+    int active_site_y;
+    uint glucose_index;
+    uint atp_index;
+    uint g6p_index;
+    uint adp_index;
+    float catalytic_scale;
+    float thermal_bias;
+    float km_glucose;
+    float km_atp;
+};
+
+layout(std430, binding = 0) buffer Concentrations {
+    float concentrations[];
+};
+
+layout(std430, binding = 1) readonly buffer TemperatureField {
+    float temperatures[];
+};
+
+layout(std430, binding = 2) readonly buffer EnzymeEntities {
+    GpuEnzymeEntity enzymes[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint species_count;
+    uint num_enzymes;
+    float dt;
+    float base_turnover_rate;
+    uint _pad0;
+    uint _pad1;
+} push_constants;
+
+uint concentration_index(uint species_index, uint cell_index, uint cell_count) {
+    return species_index * cell_count + cell_index;
+}
+
+void main() {
+    uint enzyme_index = gl_GlobalInvocationID.x;
+    if (enzyme_index >= push_constants.num_enzymes) {
+        return;
+    }
+
+    GpuEnzymeEntity enzyme = enzymes[enzyme_index];
+    if (enzyme.active_site_x < 0 || enzyme.active_site_y < 0) {
+        return;
+    }
+    if (enzyme.active_site_x >= int(push_constants.width) || enzyme.active_site_y >= int(push_constants.height)) {
+        return;
+    }
+
+    uint cell_count = push_constants.width * push_constants.height;
+    uint cell_index = uint(enzyme.active_site_y) * push_constants.width + uint(enzyme.active_site_x);
+
+    uint glucose_slot = concentration_index(enzyme.glucose_index, cell_index, cell_count);
+    uint atp_slot = concentration_index(enzyme.atp_index, cell_index, cell_count);
+    uint g6p_slot = concentration_index(enzyme.g6p_index, cell_index, cell_count);
+    uint adp_slot = concentration_index(enzyme.adp_index, cell_index, cell_count);
+
+    float glucose = max(concentrations[glucose_slot], 0.0);
+    float atp = max(concentrations[atp_slot], 0.0);
+    if (glucose <= 1e-6 || atp <= 1e-6) {
+        return;
+    }
+
+    float temperature_kelvin = temperatures[cell_index];
+    float temperature_offset = clamp((temperature_kelvin - 300.15) / 15.0, -1.5, 1.5);
+    float temperature_gain = exp(clamp(enzyme.thermal_bias * temperature_offset, -1.2, 1.2));
+    float saturation = (glucose / (enzyme.km_glucose + glucose)) * (atp / (enzyme.km_atp + atp));
+    float raw_extent = push_constants.base_turnover_rate * enzyme.catalytic_scale * temperature_gain * saturation * push_constants.dt;
+    float extent = min(raw_extent, min(glucose, atp) * 0.2);
+    if (extent <= 1e-8) {
+        return;
+    }
+
+    concentrations[glucose_slot] = max(glucose - extent, 0.0);
+    concentrations[atp_slot] = max(atp - extent, 0.0);
+    concentrations[g6p_slot] += extent;
+    concentrations[adp_slot] += extent;
+}
