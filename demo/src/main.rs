@@ -19,16 +19,16 @@ use renderer::{RenderContext, RenderPipeline, EguiRenderer};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, KeyEvent, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
 };
 
-const _TARGET_FPS: f64 = 60.0;
-const _FRAME_TIME: Duration = Duration::from_nanos((1_000_000_000.0 / _TARGET_FPS) as u64);
 const PERFORMANCE_WINDOW: Duration = Duration::from_secs(30);
 const TOOLTIP_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const ENTITY_EDIT_DEBOUNCE: Duration = Duration::from_millis(500);
+const DEFAULT_EDITOR_LEAK_RATE: f32 = 4.5;
 
 #[derive(Debug, Clone, Copy)]
 struct PerformanceSample {
@@ -62,6 +62,77 @@ struct LeakChannelOverlay {
     source: egui::Pos2,
     color: egui::Color32,
     hovered: bool,
+    selected: bool,
+    ghost: bool,
+    valid: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntityKind {
+    LeakChannel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectedEntity {
+    LeakChannel(usize),
+}
+
+#[derive(Debug, Clone)]
+struct LeakChannelDraft {
+    species_name: String,
+    rate: f32,
+    x: i32,
+    y: i32,
+    rotation_byte: u8,
+}
+
+impl LeakChannelDraft {
+    fn from_channel(channel: &fluidsim::LeakChannel, sim: &Simulation) -> Self {
+        let species_name = sim.species_registry()
+            .get(channel.species)
+            .map(|species| species.name.to_string())
+            .unwrap_or_default();
+        Self {
+            species_name,
+            rate: channel.rate,
+            x: channel.x,
+            y: channel.y,
+            rotation_byte: channel.rotation_byte(),
+        }
+    }
+
+    fn to_channel(&self, sim: &Simulation) -> Result<fluidsim::LeakChannel> {
+        let species = sim.species_registry()
+            .id_of(self.species_name.trim())
+            .ok_or_else(|| anyhow::anyhow!("Unknown species '{}'", self.species_name.trim()))?;
+        Ok(fluidsim::LeakChannel::new(
+            self.rate.max(0.0),
+            species,
+            self.x,
+            self.y,
+            self.rotation_byte as i8,
+        ))
+    }
+
+    fn rotate_eighth_turn(&mut self) {
+        self.rotation_byte = self.rotation_byte.wrapping_add(fluidsim::LeakChannel::EIGHTH_TURN);
+    }
+
+    fn rotation_degrees(&self) -> u32 {
+        let step = (self.rotation_byte as u32 + 16) / 32;
+        (step % 8) * 45
+    }
+
+    fn set_rotation_degrees(&mut self, degrees: u32) {
+        let snapped = ((degrees + 22) / 45) % 8;
+        self.rotation_byte = (snapped as u8).saturating_mul(fluidsim::LeakChannel::EIGHTH_TURN);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlacementState {
+    kind: EntityKind,
+    leak_channel: LeakChannelDraft,
 }
 
 /// Which scenario to run.
@@ -118,6 +189,13 @@ struct DemoApp {
     thermal_view: bool,
     performance_overlay: bool,
     modifiers: ModifiersState,
+    create_menu_open: bool,
+    placement_state: Option<PlacementState>,
+    selected_entity: Option<SelectedEntity>,
+    inspector_draft: Option<LeakChannelDraft>,
+    inspector_dirty: bool,
+    inspector_last_apply: Instant,
+    inspector_error: Option<String>,
     
     // Timing
     last_frame: Instant,
@@ -150,6 +228,13 @@ impl DemoApp {
             thermal_view: false,
             performance_overlay: false,
             modifiers: ModifiersState::empty(),
+            create_menu_open: false,
+            placement_state: None,
+            selected_entity: None,
+            inspector_draft: None,
+            inspector_dirty: false,
+            inspector_last_apply: Instant::now(),
+            inspector_error: None,
             last_frame: Instant::now(),
             frame_count: 0,
             fps_update_time: Instant::now(),
@@ -270,10 +355,342 @@ impl DemoApp {
         self.tooltip_text.clear();
         self.last_tooltip_coord = None;
         self.hovered_leak_channel = None;
+        self.create_menu_open = false;
+        self.placement_state = None;
+        self.selected_entity = None;
+        self.inspector_draft = None;
+        self.inspector_dirty = false;
+        self.inspector_error = None;
         self.last_frame = Instant::now();
 
         log::info!("Simulation reset ({:?} scenario)", self.scenario);
         Ok(())
+    }
+
+    fn grid_position_from_mouse(&self) -> Option<(i32, i32)> {
+        let sim = self.simulation.as_ref()?;
+        let window = self.window.as_ref()?;
+        let (grid_w, grid_h) = sim.dimensions();
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let logical_w = size.width as f32 / scale;
+        let logical_h = size.height as f32 / scale;
+        if logical_w <= 0.0 || logical_h <= 0.0 {
+            return None;
+        }
+
+        let grid_x = (self.mouse_pos.0 * grid_w as f32 / logical_w).floor() as i32;
+        let grid_y = (self.mouse_pos.1 * grid_h as f32 / logical_h).floor() as i32;
+        Some((
+            grid_x.clamp(0, grid_w.saturating_sub(1) as i32),
+            grid_y.clamp(0, grid_h.saturating_sub(1) as i32),
+        ))
+    }
+
+    fn default_leak_species_name(&self) -> String {
+        let Some(sim) = self.simulation.as_ref() else {
+            return "Na+".to_string();
+        };
+
+        if sim.species_registry().id_of("Na+").is_some() {
+            "Na+".to_string()
+        } else {
+            sim.species_registry().iter()
+                .next()
+                .map(|species| species.name.to_string())
+                .unwrap_or_else(|| "Na+".to_string())
+        }
+    }
+
+    fn default_leak_channel_draft(&self) -> LeakChannelDraft {
+        let (x, y) = self.grid_position_from_mouse().unwrap_or((0, 0));
+        LeakChannelDraft {
+            species_name: self.default_leak_species_name(),
+            rate: DEFAULT_EDITOR_LEAK_RATE,
+            x,
+            y,
+            rotation_byte: 0,
+        }
+    }
+
+    fn begin_placing_entity(&mut self, kind: EntityKind) {
+        self.create_menu_open = false;
+        self.placement_state = Some(match kind {
+            EntityKind::LeakChannel => PlacementState {
+                kind,
+                leak_channel: self.default_leak_channel_draft(),
+            },
+        });
+    }
+
+    fn preview_leak_channel(&self) -> Option<fluidsim::LeakChannel> {
+        let sim = self.simulation.as_ref()?;
+        let placement = self.placement_state.as_ref()?;
+        if placement.kind != EntityKind::LeakChannel {
+            return None;
+        }
+
+        let mut draft = placement.leak_channel.clone();
+        let (x, y) = self.grid_position_from_mouse()?;
+        draft.x = x;
+        draft.y = y;
+        draft.to_channel(sim).ok()
+    }
+
+    fn rotate_placement_entity(&mut self) {
+        if let Some(placement) = &mut self.placement_state {
+            if placement.kind == EntityKind::LeakChannel {
+                placement.leak_channel.rotate_eighth_turn();
+            }
+        }
+    }
+
+    fn select_entity(&mut self, selection: Option<SelectedEntity>) {
+        let _ = self.apply_selected_entity_changes(true);
+        self.selected_entity = selection;
+        self.inspector_dirty = false;
+        self.inspector_error = None;
+        self.inspector_last_apply = Instant::now();
+        self.inspector_draft = match selection {
+            Some(SelectedEntity::LeakChannel(index)) => {
+                self.simulation.as_ref()
+                    .and_then(|sim| sim.leak_channels().get(index).map(|channel| LeakChannelDraft::from_channel(channel, sim)))
+            }
+            None => None,
+        };
+    }
+
+    fn apply_selected_entity_changes(&mut self, force: bool) -> Result<()> {
+        if !self.inspector_dirty {
+            return Ok(());
+        }
+        if !force && self.inspector_last_apply.elapsed() < ENTITY_EDIT_DEBOUNCE {
+            return Ok(());
+        }
+
+        let Some(selection) = self.selected_entity else {
+            self.inspector_dirty = false;
+            return Ok(());
+        };
+        let Some(draft) = self.inspector_draft.clone() else {
+            self.inspector_dirty = false;
+            return Ok(());
+        };
+
+        self.inspector_last_apply = Instant::now();
+        let sim = self.simulation.as_mut().unwrap();
+        let result = match selection {
+            SelectedEntity::LeakChannel(index) => {
+                let channel = draft.to_channel(sim)?;
+                sim.update_leak_channel(index, channel)
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                self.inspector_dirty = false;
+                self.inspector_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.inspector_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn handle_primary_click(&mut self) {
+        if self.placement_state.is_some() {
+            if let Some(channel) = self.preview_leak_channel() {
+                if let Some(sim) = &mut self.simulation {
+                    match sim.add_leak_channel(channel) {
+                        Ok(()) => {
+                            let index = sim.leak_channels().len().saturating_sub(1);
+                            self.placement_state = None;
+                            self.select_entity(Some(SelectedEntity::LeakChannel(index)));
+                        }
+                        Err(error) => {
+                            self.inspector_error = Some(error.to_string());
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(index) = self.hovered_leak_channel {
+            self.select_entity(Some(SelectedEntity::LeakChannel(index)));
+        } else {
+            self.select_entity(None);
+        }
+    }
+
+    fn placement_overlay(&self) -> Option<LeakChannelOverlay> {
+        let sim = self.simulation.as_ref()?;
+        let channel = self.preview_leak_channel()?;
+        let center = self.grid_to_screen(channel.x as f32 + 0.5, channel.y as f32 + 0.5)?;
+        let species_name = sim.species_registry()
+            .get(channel.species)
+            .map(|species| species.name.as_ref())
+            .unwrap_or("?");
+        let color = match species_name {
+            "Na+" => egui::Color32::from_rgb(242, 102, 74),
+            "K+" => egui::Color32::from_rgb(92, 214, 110),
+            _ => egui::Color32::from_rgb(230, 230, 230),
+        };
+
+        if let Some(((sink_x, sink_y), (source_x, source_y))) = sim.resolve_leak_channel_endpoints(&channel) {
+            Some(LeakChannelOverlay {
+                center,
+                sink: self.grid_to_screen(sink_x as f32 + 0.5, sink_y as f32 + 0.5)?,
+                source: self.grid_to_screen(source_x as f32 + 0.5, source_y as f32 + 0.5)?,
+                color,
+                hovered: false,
+                selected: false,
+                ghost: true,
+                valid: true,
+            })
+        } else {
+            Some(LeakChannelOverlay {
+                center,
+                sink: center,
+                source: center,
+                color,
+                hovered: false,
+                selected: false,
+                ghost: true,
+                valid: false,
+            })
+        }
+    }
+
+    fn draw_editor_ui(&mut self, ctx: &egui::Context) {
+        use egui::{Align2, Color32, Frame, Margin, RichText, Stroke};
+
+        egui::Area::new("entity_create_button".into())
+            .anchor(Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
+            .show(ctx, |ui| {
+                Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 220))
+                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 32)))
+                    .inner_margin(Margin::same(8.0))
+                    .show(ui, |ui| {
+                        if ui.button(RichText::new("CREATE").strong()).clicked() {
+                            self.create_menu_open = true;
+                        }
+                    });
+            });
+
+        if self.create_menu_open {
+            egui::Window::new("Create Entity")
+                .anchor(Align2::LEFT_TOP, egui::vec2(12.0, 56.0))
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.strong("Transport");
+                    ui.add_space(4.0);
+                    if ui.button("Leak Channel").clicked() {
+                        self.begin_placing_entity(EntityKind::LeakChannel);
+                    }
+                });
+        }
+
+        if let Some(placement) = &self.placement_state {
+            egui::Area::new("entity_placement_status".into())
+                .anchor(Align2::LEFT_TOP, egui::vec2(12.0, if self.create_menu_open { 170.0 } else { 56.0 }))
+                .show(ctx, |ui| {
+                    Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 215))
+                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28)))
+                        .inner_margin(Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Placing Leak Channel").strong());
+                            ui.label(format!("Species: {}", placement.leak_channel.species_name));
+                            ui.label(format!("Rate: {:.2}", placement.leak_channel.rate));
+                            ui.label(format!("Rotation: {} deg", placement.leak_channel.rotation_degrees()));
+                            ui.label("Click in the sim to place. Press r to rotate 45 deg.");
+                        });
+                });
+        }
+
+        if let Some(SelectedEntity::LeakChannel(index)) = self.selected_entity {
+            let (max_x, max_y) = self.simulation.as_ref()
+                .map(|sim| sim.dimensions())
+                .unwrap_or((512, 512));
+            egui::Area::new("entity_inspector".into())
+                .anchor(Align2::LEFT_CENTER, egui::vec2(16.0, 0.0))
+                .show(ctx, |ui| {
+                    Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 230))
+                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 32)))
+                        .inner_margin(Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(300.0);
+                            ui.label(RichText::new("Leak Channel").strong().size(18.0));
+                            ui.small(format!("Entity {}", index + 1));
+                            ui.add_space(8.0);
+
+                            if let Some(draft) = &mut self.inspector_draft {
+                                ui.label("Species");
+                                if ui.text_edit_singleline(&mut draft.species_name).changed() {
+                                    self.inspector_dirty = true;
+                                }
+
+                                ui.add_space(6.0);
+                                if ui.add(egui::Slider::new(&mut draft.rate, 0.0..=12.0).text("Rate")).changed() {
+                                    self.inspector_dirty = true;
+                                }
+
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label("X");
+                                    if ui.add(egui::DragValue::new(&mut draft.x).range(0..=max_x.saturating_sub(1) as i32)).changed() {
+                                        self.inspector_dirty = true;
+                                    }
+                                    ui.label("Y");
+                                    if ui.add(egui::DragValue::new(&mut draft.y).range(0..=max_y.saturating_sub(1) as i32)).changed() {
+                                        self.inspector_dirty = true;
+                                    }
+                                });
+
+                                ui.add_space(6.0);
+                                let mut rotation_degrees = draft.rotation_degrees();
+                                if ui.add(egui::Slider::new(&mut rotation_degrees, 0..=315).step_by(45.0).text("Rotation")).changed() {
+                                    draft.set_rotation_degrees(rotation_degrees);
+                                    self.inspector_dirty = true;
+                                }
+                                ui.small(format!("Rotation byte: {}", draft.rotation_byte));
+
+                                if let Some(sim) = self.simulation.as_ref() {
+                                    match draft.to_channel(sim) {
+                                        Ok(channel) => {
+                                            ui.small(format!("Flow: {}", channel.flow_label()));
+                                            if let Some(((sink_x, sink_y), (source_x, source_y))) = sim.resolve_leak_channel_endpoints(&channel) {
+                                                ui.small(format!("Sink: ({sink_x}, {sink_y})  Source: ({source_x}, {source_y})"));
+                                            } else {
+                                                ui.colored_label(Color32::YELLOW, "No valid fluid endpoints for current placement.");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            ui.colored_label(Color32::YELLOW, error.to_string());
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.add_space(8.0);
+                            if self.inspector_dirty {
+                                ui.small("Pending live update...");
+                            }
+                            if let Some(error) = &self.inspector_error {
+                                ui.colored_label(Color32::from_rgb(255, 120, 120), error);
+                            }
+                            if ui.button("Deselect").clicked() {
+                                self.select_entity(None);
+                            }
+                        });
+                });
+        }
     }
 
     fn update_tooltip(&mut self) {
@@ -475,6 +892,9 @@ impl DemoApp {
                 source,
                 color,
                 hovered: self.hovered_leak_channel == Some(index),
+                selected: self.selected_entity == Some(SelectedEntity::LeakChannel(index)),
+                ghost: false,
+                valid: true,
             });
         }
 
@@ -492,25 +912,42 @@ impl DemoApp {
         ));
 
         for overlay in overlays {
-            let outline = if overlay.hovered {
+            let outline = if overlay.selected {
+                egui::Color32::from_rgb(255, 242, 120)
+            } else if overlay.hovered {
                 egui::Color32::WHITE
             } else {
                 egui::Color32::from_rgb(18, 22, 28)
             };
+            let line_color = if overlay.ghost {
+                if overlay.valid {
+                    egui::Color32::from_rgba_unmultiplied(overlay.color.r(), overlay.color.g(), overlay.color.b(), 170)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(255, 120, 120, 170)
+                }
+            } else {
+                overlay.color
+            };
+            let backbone_color = if overlay.ghost {
+                egui::Color32::from_rgba_unmultiplied(14, 18, 24, 120)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(14, 18, 24, 210)
+            };
 
             painter.line_segment(
                 [overlay.sink, overlay.source],
-                egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(14, 18, 24, 210)),
+                egui::Stroke::new(if overlay.selected { 6.0 } else { 5.0 }, backbone_color),
             );
             painter.circle_filled(overlay.center, 8.5, egui::Color32::from_rgba_unmultiplied(236, 240, 245, 210));
             painter.circle_stroke(
                 overlay.center,
                 8.5,
-                egui::Stroke::new(if overlay.hovered { 3.0 } else { 2.0 }, outline),
+                egui::Stroke::new(if overlay.selected || overlay.hovered { 3.0 } else { 2.0 }, outline),
             );
-            painter.circle_filled(overlay.center, 4.2, overlay.color);
+            painter.circle_filled(overlay.center, 4.2, line_color);
 
-            let tangent = egui::vec2(overlay.source.x - overlay.sink.x, overlay.source.y - overlay.sink.y).normalized();
+            let delta = egui::vec2(overlay.source.x - overlay.sink.x, overlay.source.y - overlay.sink.y);
+            let tangent = if delta.length_sq() > 0.0 { delta.normalized() } else { egui::vec2(1.0, 0.0) };
             let normal = egui::vec2(-tangent.y, tangent.x);
             let left_top = overlay.center - tangent * 10.0 + normal * 5.0;
             let left_bottom = overlay.center - tangent * 10.0 - normal * 5.0;
@@ -523,9 +960,9 @@ impl DemoApp {
             let arrow_tip = overlay.source;
             let arrow_left = arrow_base - tangent * 5.5 + normal * 3.5;
             let arrow_right = arrow_base - tangent * 5.5 - normal * 3.5;
-            painter.line_segment([arrow_base, arrow_tip], egui::Stroke::new(2.0, overlay.color));
-            painter.line_segment([arrow_tip, arrow_left], egui::Stroke::new(2.0, overlay.color));
-            painter.line_segment([arrow_tip, arrow_right], egui::Stroke::new(2.0, overlay.color));
+            painter.line_segment([arrow_base, arrow_tip], egui::Stroke::new(2.0, line_color));
+            painter.line_segment([arrow_tip, arrow_left], egui::Stroke::new(2.0, line_color));
+            painter.line_segment([arrow_tip, arrow_right], egui::Stroke::new(2.0, line_color));
         }
     }
 
@@ -903,6 +1340,12 @@ impl ApplicationHandler for DemoApp {
                     Key::Named(NamedKey::Escape) => {
                         event_loop.exit();
                     }
+                    Key::Character(ref c) if (c == "r" || c == "R") && !self.modifiers.shift_key() && self.placement_state.is_some() => {
+                        self.rotate_placement_entity();
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                     Key::Named(NamedKey::Space) => {
                         if let Some(sim) = &mut self.simulation {
                             sim.toggle_pause();
@@ -946,6 +1389,13 @@ impl ApplicationHandler for DemoApp {
                     _ => {}
                 }
             }
+
+            WindowEvent::MouseInput { button: MouseButton::Left, state: ElementState::Released, .. } => {
+                self.handle_primary_click();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             
             WindowEvent::CursorMoved { position, .. } => {
                 // Store position in logical coordinates for egui
@@ -973,16 +1423,27 @@ impl ApplicationHandler for DemoApp {
                 let performance_summary = self.performance_summary();
                 let performance_samples: Vec<_> = self.performance_samples.iter().copied().collect();
                 let hovered_coarse_rect = self.hovered_coarse_rect();
-                let leak_channel_overlays = self.leak_channel_overlays();
+                let mut leak_channel_overlays = self.leak_channel_overlays();
+                if let Some(ghost) = self.placement_overlay() {
+                    leak_channel_overlays.push(ghost);
+                }
                 
                 // Render egui overlay (not actually rendered to screen)
-                if let (Some(egui), Some(window)) = (&mut self.egui_renderer, &self.window) {
-                    egui.begin_frame(window);
+                if self.egui_renderer.is_some() && self.window.is_some() {
+                    {
+                        let window = self.window.as_ref().unwrap();
+                        let egui = self.egui_renderer.as_mut().unwrap();
+                        egui.begin_frame(window);
+                    }
+
+                    let egui_ctx = self.egui_renderer.as_ref().unwrap().context().clone();
+
+                    self.draw_editor_ui(&egui_ctx);
 
                     if let Some(rect) = hovered_coarse_rect {
-                        Self::draw_hovered_coarse_outline(egui.context(), rect);
+                        Self::draw_hovered_coarse_outline(&egui_ctx, rect);
                     }
-                    Self::draw_leak_channels(egui.context(), &leak_channel_overlays);
+                    Self::draw_leak_channels(&egui_ctx, &leak_channel_overlays);
                     
                     // Show tooltip near mouse
                     if self.show_tooltip {
@@ -990,18 +1451,22 @@ impl ApplicationHandler for DemoApp {
                             .fixed_pos(egui::pos2(self.mouse_pos.0 + 15.0, self.mouse_pos.1 + 15.0))
                             .collapsible(false)
                             .resizable(false)
-                            .show(egui.context(), |ui| {
+                            .show(&egui_ctx, |ui| {
                                 ui.monospace(&self.tooltip_text);
                             });
                     }
 
                     Self::draw_performance_overlay(
-                        egui.context(),
+                        &egui_ctx,
                         performance_overlay,
                         performance_summary,
                         &performance_samples,
                     );
-                    
+
+                    let _ = self.apply_selected_entity_changes(false);
+
+                    let window = self.window.as_ref().unwrap();
+                    let egui = self.egui_renderer.as_mut().unwrap();
                     let _output = egui.end_frame(window);
                 }
                 let t3 = Instant::now();

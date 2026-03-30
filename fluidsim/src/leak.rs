@@ -12,6 +12,8 @@ pub struct LeakChannel {
 }
 
 impl LeakChannel {
+    pub const EIGHTH_TURN: u8 = 32;
+
     pub fn new(rate: f32, species: SpeciesId, x: i32, y: i32, rotation: i8) -> Self {
         Self {
             rate,
@@ -24,6 +26,15 @@ impl LeakChannel {
 
     pub fn rotation_byte(&self) -> u8 {
         self.rotation as u8
+    }
+
+    pub fn set_rotation_byte(&mut self, rotation_byte: u8) {
+        self.rotation = rotation_byte as i8;
+    }
+
+    pub fn rotate_eighth_turn(&mut self) {
+        let next = self.rotation_byte().wrapping_add(Self::EIGHTH_TURN);
+        self.set_rotation_byte(next);
     }
 
     pub fn angle_radians(&self) -> f32 {

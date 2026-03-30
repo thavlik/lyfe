@@ -328,6 +328,39 @@ pub struct GpuSimulation {
 }
 
 impl GpuSimulation {
+    fn pack_leak_channels(
+        &self,
+        channels: &[LeakChannel],
+        species_registry: &SpeciesRegistry,
+        solid_mask: &[u32],
+    ) -> Result<Vec<GpuLeakChannel>> {
+        if channels.len() > MAX_LEAK_CHANNELS {
+            bail!("Too many leak channels: {} > {}", channels.len(), MAX_LEAK_CHANNELS);
+        }
+
+        let mut packed_channels = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let species_index = species_registry.index_of(channel.species)
+                .context("Leak channel species is not registered in this scenario")? as u32;
+            let ((sink_x, sink_y), (source_x, source_y)) = channel
+                .resolve_endpoints(self.width, self.height, solid_mask)
+                .context("Leak channel does not resolve to valid fluid endpoints")?;
+
+            packed_channels.push(GpuLeakChannel {
+                species_index,
+                sink_x,
+                sink_y,
+                source_x,
+                source_y,
+                rate: channel.rate,
+                rotation_byte: channel.rotation as u8 as u32,
+                _pad: 0,
+            });
+        }
+
+        Ok(packed_channels)
+    }
+
     /// Create a new GPU simulation context.
     /// 
     /// This creates a Vulkan instance and device suitable for compute-only
@@ -2487,28 +2520,11 @@ impl GpuSimulation {
         if channels.is_empty() {
             return Ok(());
         }
-        if channels.len() > MAX_LEAK_CHANNELS {
-            bail!("Too many leak channels: {} > {}", channels.len(), MAX_LEAK_CHANNELS);
-        }
         if self.leak.is_some() {
             return Ok(());
         }
 
-        let packed_channels: Vec<GpuLeakChannel> = channels.iter().filter_map(|channel| {
-            let species_index = species_registry.index_of(channel.species)? as u32;
-            let ((sink_x, sink_y), (source_x, source_y)) =
-                channel.resolve_endpoints(self.width, self.height, solid_mask)?;
-            Some(GpuLeakChannel {
-                species_index,
-                sink_x,
-                sink_y,
-                source_x,
-                source_y,
-                rate: channel.rate,
-                rotation_byte: channel.rotation as u8 as u32,
-                _pad: 0,
-            })
-        }).collect();
+        let packed_channels = self.pack_leak_channels(channels, species_registry, solid_mask)?;
 
         let channels_buffer_size = (MAX_LEAK_CHANNELS * std::mem::size_of::<GpuLeakChannel>()) as u64;
         let conc_buffer_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
@@ -2654,6 +2670,39 @@ impl GpuSimulation {
             channels_buffer,
             active_channel_count: packed_channels.len() as u32,
         });
+
+        Ok(())
+    }
+
+    pub fn upload_leak_channels(
+        &mut self,
+        channels: &[LeakChannel],
+        species_registry: &SpeciesRegistry,
+        solid_mask: &[u32],
+    ) -> Result<()> {
+        if self.leak.is_none() {
+            return self.init_leak_pipeline(channels, species_registry, solid_mask);
+        }
+
+        let packed_channels = self.pack_leak_channels(channels, species_registry, solid_mask)?;
+        let leak = self.leak.as_mut().unwrap();
+        leak.active_channel_count = packed_channels.len() as u32;
+
+        if packed_channels.is_empty() {
+            return Ok(());
+        }
+
+        self.staging_buffer.write(&packed_channels)?;
+        Self::copy_buffer_sync(
+            &self.device,
+            self.command_pool,
+            self.compute_queue,
+            self.fence,
+            self.staging_buffer.buffer,
+            leak.channels_buffer.buffer,
+            (packed_channels.len() * std::mem::size_of::<GpuLeakChannel>()) as u64,
+            Some(self.command_buffer),
+        )?;
 
         Ok(())
     }

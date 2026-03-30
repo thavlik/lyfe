@@ -638,6 +638,11 @@ impl Simulation {
         channel.resolve_endpoints(self.grid.width, self.grid.height, solid_mask)
     }
 
+    pub fn resolve_leak_channel_endpoints(&self, channel: &LeakChannel) -> Option<((i32, i32), (i32, i32))> {
+        let solid_mask = self.cached_solid_mask.as_ref()?;
+        channel.resolve_endpoints(self.grid.width, self.grid.height, solid_mask)
+    }
+
     pub fn leak_channel_tooltip(&self, index: usize) -> Option<String> {
         let channel = self.leak_channels.get(index)?;
         let species_name = self.species_registry.get(channel.species)?.name.as_ref();
@@ -652,6 +657,35 @@ impl Simulation {
             source_x,
             source_y,
         ))
+    }
+
+    pub fn add_leak_channel(&mut self, channel: LeakChannel) -> Result<()> {
+        self.leak_channels.push(channel);
+        if let Err(error) = self.sync_leak_channels() {
+            self.leak_channels.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn update_leak_channel(&mut self, index: usize, channel: LeakChannel) -> Result<()> {
+        let Some(existing) = self.leak_channels.get_mut(index) else {
+            return Err(anyhow::anyhow!("Leak channel index {} out of range", index));
+        };
+
+        let previous = existing.clone();
+        *existing = channel;
+        if let Err(error) = self.sync_leak_channels() {
+            *self.leak_channels.get_mut(index).unwrap() = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn sync_leak_channels(&mut self) -> Result<()> {
+        let solid_mask = self.cached_solid_mask.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Solid mask cache is unavailable"))?;
+        self.gpu.upload_leak_channels(&self.leak_channels, &self.species_registry, solid_mask)
     }
 
     /// Get the current simulation time.
