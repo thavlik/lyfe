@@ -1227,8 +1227,10 @@ impl GpuSimulation {
         set: vk::DescriptorSet,
         conc_buffer: vk::Buffer,
         channels_buffer: vk::Buffer,
+        charges_buffer: vk::Buffer,
         conc_size: u64,
         channels_size: u64,
+        charges_size: u64,
     ) {
         let conc_info = [vk::DescriptorBufferInfo::default()
             .buffer(conc_buffer)
@@ -1238,6 +1240,10 @@ impl GpuSimulation {
             .buffer(channels_buffer)
             .offset(0)
             .range(channels_size)];
+        let charges_info = [vk::DescriptorBufferInfo::default()
+            .buffer(charges_buffer)
+            .offset(0)
+            .range(charges_size)];
 
         let writes = [
             vk::WriteDescriptorSet::default()
@@ -1250,6 +1256,11 @@ impl GpuSimulation {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(&channel_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&charges_info),
         ];
 
         unsafe { device.update_descriptor_sets(&writes, &[]) };
@@ -1596,21 +1607,21 @@ impl GpuSimulation {
                     Self::temperature_buffer_handle(rxn, temperature_current_buffer),
                 );
             }
-        }
 
-        if let Some(leak) = self.leak.as_ref() {
-            if leak.active_channel_count > 0 {
-                let leak_push = LeakPushConstants {
-                    width: self.width,
-                    height: self.height,
-                    species_count: self.species_count as u32,
-                    num_channels: leak.active_channel_count,
-                    dt: reaction_dt,
-                    _pad: [0; 3],
-                };
-                let leak_descriptor_set = leak.leak_descriptor_sets[self.current_buffer];
-                self.record_leak_dispatch(cmd, leak, leak_descriptor_set, &leak_push);
-                self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
+            if let Some(leak) = self.leak.as_ref() {
+                if leak.active_channel_count > 0 {
+                    let leak_push = LeakPushConstants {
+                        width: self.width,
+                        height: self.height,
+                        species_count: self.species_count as u32,
+                        num_channels: leak.active_channel_count,
+                        dt: substep_dt,
+                        _pad: [0; 3],
+                    };
+                    let leak_descriptor_set = leak.leak_descriptor_sets[self.current_buffer];
+                    self.record_leak_dispatch(cmd, leak, leak_descriptor_set, &leak_push);
+                    self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
+                }
             }
         }
 
@@ -2501,6 +2512,7 @@ impl GpuSimulation {
 
         let channels_buffer_size = (MAX_LEAK_CHANNELS * std::mem::size_of::<GpuLeakChannel>()) as u64;
         let conc_buffer_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
+        let charges_buffer_size = (self.species_count * std::mem::size_of::<i32>()) as u64;
 
         let mut alloc = self.allocator.as_ref().unwrap().lock();
         let channels_buffer = GpuBuffer::new(
@@ -2552,6 +2564,11 @@ impl GpuSimulation {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
@@ -2612,16 +2629,20 @@ impl GpuSimulation {
             leak_descriptor_sets[0],
             self.conc_buffer_a.buffer,
             channels_buffer.buffer,
+            self.species_charges.buffer,
             conc_buffer_size,
             channels_buffer_size,
+            charges_buffer_size,
         );
         Self::update_leak_descriptor_set(
             &self.device,
             leak_descriptor_sets[1],
             self.conc_buffer_b.buffer,
             channels_buffer.buffer,
+            self.species_charges.buffer,
             conc_buffer_size,
             channels_buffer_size,
+            charges_buffer_size,
         );
 
         self.leak = Some(LeakPipelineState {

@@ -2,11 +2,14 @@
 
 // Diffusion compute shader for species transport
 //
-// This shader performs one step of the diffusion equation with an added
-// charge-disparity boost for ionic species:
-//   c_new[i] = c[i] + D * dt * sum(edge_scale * (c_neighbor - c_i))
-// When adjacent cells differ in net charge, we increase the diffusive coupling
-// across that edge so local charge pockets relax faster without destroying mass.
+// This shader performs one bounded electrochemical transport step:
+//   c_new[i] = c[i] + D * dt * sum(edge_scale * (c_neighbor - c_i)
+//                                 + electrochemical_drift)
+// The electrochemical term approximates a Nernst-Planck migration flux using
+// local net-charge disparities as a proxy for the unresolved electric field.
+// When adjacent cells differ in net charge, ionic transport is accelerated in
+// the charge-relaxing direction so local charge pockets dissipate quickly while
+// remaining stable enough for real-time stepping.
 //
 // Layout: [species][cell] where cell = y * width + x
 // Dispatch: (ceil(cell_count / 256), species_count, 1)
@@ -49,8 +52,10 @@ layout(set = 0, binding = 4) readonly buffer SpeciesCharges {
     int species_charges[];
 };
 
-const float CHARGE_RELAXATION_BOOST = 2.0;
-const float MAX_EDGE_SCALE = 3.0;
+const float CHARGE_RELAXATION_BOOST = 5.0;
+const float ELECTROCHEMICAL_DRIFT = 4.0;
+const float MAX_EDGE_SCALE = 6.0;
+const float MAX_CHARGE_DELTA = 1.5;
 
 float cell_net_charge(uint cell_idx, uint cell_count) {
     float net_charge = 0.0;
@@ -65,18 +70,32 @@ float cell_net_charge(uint cell_idx, uint cell_count) {
     return net_charge;
 }
 
-float edge_charge_scale(
-    int species_charge,
-    float current_net_charge,
-    float neighbor_net_charge
-) {
+float edge_charge_scale(int species_charge, float charge_delta) {
     if (species_charge == 0) {
         return 1.0;
     }
 
-    float charge_disparity = abs(neighbor_net_charge - current_net_charge);
+    float charge_disparity = min(abs(charge_delta), MAX_CHARGE_DELTA);
     float boost = 1.0 + CHARGE_RELAXATION_BOOST * min(charge_disparity, 1.0);
     return min(boost, MAX_EDGE_SCALE);
+}
+
+float electrochemical_flux(
+    int species_charge,
+    float current_c,
+    float neighbor_c,
+    float charge_delta
+) {
+    if (species_charge == 0) {
+        return 0.0;
+    }
+
+    float bounded_charge_delta = clamp(charge_delta, -MAX_CHARGE_DELTA, MAX_CHARGE_DELTA);
+    float average_concentration = 0.5 * (current_c + neighbor_c);
+    return ELECTROCHEMICAL_DRIFT
+        * float(species_charge)
+        * bounded_charge_delta
+        * average_concentration;
 }
 
 void main() {
@@ -123,8 +142,10 @@ void main() {
         if (solid_mask[left_idx] == 0) {
             float c_left = src_conc[species_idx * cell_count + left_idx];
             float left_net_charge = cell_net_charge(left_idx, cell_count);
-            float edge_scale = edge_charge_scale(z, current_net_charge, left_net_charge);
+            float charge_delta = left_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
             flux += (c_left - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_left, charge_delta);
             neighbor_count++;
         }
     }
@@ -135,8 +156,10 @@ void main() {
         if (solid_mask[right_idx] == 0) {
             float c_right = src_conc[species_idx * cell_count + right_idx];
             float right_net_charge = cell_net_charge(right_idx, cell_count);
-            float edge_scale = edge_charge_scale(z, current_net_charge, right_net_charge);
+            float charge_delta = right_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
             flux += (c_right - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_right, charge_delta);
             neighbor_count++;
         }
     }
@@ -147,8 +170,10 @@ void main() {
         if (solid_mask[top_idx] == 0) {
             float c_top = src_conc[species_idx * cell_count + top_idx];
             float top_net_charge = cell_net_charge(top_idx, cell_count);
-            float edge_scale = edge_charge_scale(z, current_net_charge, top_net_charge);
+            float charge_delta = top_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
             flux += (c_top - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_top, charge_delta);
             neighbor_count++;
         }
     }
@@ -159,8 +184,10 @@ void main() {
         if (solid_mask[bottom_idx] == 0) {
             float c_bottom = src_conc[species_idx * cell_count + bottom_idx];
             float bottom_net_charge = cell_net_charge(bottom_idx, cell_count);
-            float edge_scale = edge_charge_scale(z, current_net_charge, bottom_net_charge);
+            float charge_delta = bottom_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
             flux += (c_bottom - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_bottom, charge_delta);
             neighbor_count++;
         }
     }

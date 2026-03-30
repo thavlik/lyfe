@@ -155,7 +155,7 @@ fn effective_charge_correction_strength(configured_strength: f32, leak_channels:
 impl Simulation {
     const MIN_KINETICS_INTERVAL_SECONDS: f64 = 1.0;
     const MAX_KINETICS_INTERVAL_SECONDS: f64 = 30.0;
-    const MAX_CHARGE_RELAXATION_DIFFUSION_SCALE: f32 = 3.0;
+    const MAX_CHARGE_RELAXATION_DIFFUSION_SCALE: f32 = 8.0;
 
     /// Create a new simulation from a scenario.
     pub fn from_scenario(scenario: Scenario, config: SimulationConfig) -> Result<Self> {

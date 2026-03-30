@@ -31,6 +31,39 @@ fn fluid_total(values: &[f32], solid_mask: &[u32]) -> f32 {
         .sum()
 }
 
+fn charge_metrics(concentrations: &[Vec<f32>], charges: &[i32], solid_mask: &[u32]) -> (f32, f32) {
+    let mut max_abs_charge = 0.0_f32;
+    let mut total_abs_charge = 0.0_f32;
+    let mut fluid_cells = 0usize;
+
+    for (cell_index, mask) in solid_mask.iter().enumerate() {
+        if *mask != 0 {
+            continue;
+        }
+
+        let mut net_charge = 0.0;
+        for (species_index, charge) in charges.iter().enumerate() {
+            if *charge == 0 {
+                continue;
+            }
+            net_charge += *charge as f32 * concentrations[species_index][cell_index];
+        }
+
+        let abs_charge = net_charge.abs();
+        max_abs_charge = max_abs_charge.max(abs_charge);
+        total_abs_charge += abs_charge;
+        fluid_cells += 1;
+    }
+
+    let mean_abs_charge = if fluid_cells > 0 {
+        total_abs_charge / fluid_cells as f32
+    } else {
+        0.0
+    };
+
+    (max_abs_charge, mean_abs_charge)
+}
+
 fn main() {
     let config = SimulationConfig {
         width: 128,
@@ -48,6 +81,11 @@ fn main() {
     let width = config.width;
     let height = config.height;
     let mut simulation = Simulation::new_leak(config).expect("leak sim should initialize");
+    let charges: Vec<i32> = simulation
+        .species_registry()
+        .iter()
+        .map(|species| species.charge)
+        .collect();
 
     let k_idx = simulation.species_registry().index_of_name("K+").expect("K+ registered");
     let na_idx = simulation.species_registry().index_of_name("Na+").expect("Na+ registered");
@@ -72,6 +110,8 @@ fn main() {
     let initial_na_total = fluid_total(&initial.concentrations[na_idx], &initial.solid_mask);
     let initial_cl_total = fluid_total(&initial.concentrations[cl_idx], &initial.solid_mask);
     let initial_spectator_charge = initial_k_total + initial_na_total - initial_cl_total;
+    let (initial_max_abs_charge, initial_mean_abs_charge) =
+        charge_metrics(&initial.concentrations, &charges, &initial.solid_mask);
     let initial_k_inside = region_total(
         &initial.concentrations[k_idx],
         &initial.solid_mask,
@@ -124,6 +164,8 @@ fn main() {
     let final_na_total = fluid_total(&final_state.concentrations[na_idx], &final_state.solid_mask);
     let final_cl_total = fluid_total(&final_state.concentrations[cl_idx], &final_state.solid_mask);
     let final_spectator_charge = final_k_total + final_na_total - final_cl_total;
+    let (final_max_abs_charge, final_mean_abs_charge) =
+        charge_metrics(&final_state.concentrations, &charges, &final_state.solid_mask);
     let final_k_inside = region_total(
         &final_state.concentrations[k_idx],
         &final_state.solid_mask,
@@ -173,12 +215,16 @@ fn main() {
     println!("initial_na_total={initial_na_total}");
     println!("initial_cl_total={initial_cl_total}");
     println!("initial_spectator_charge={initial_spectator_charge}");
+    println!("initial_max_abs_charge={initial_max_abs_charge}");
+    println!("initial_mean_abs_charge={initial_mean_abs_charge}");
     println!("final_k_inside={final_k_inside}");
     println!("final_na_outside={final_na_outside}");
     println!("final_k_total={final_k_total}");
     println!("final_na_total={final_na_total}");
     println!("final_cl_total={final_cl_total}");
     println!("final_spectator_charge={final_spectator_charge}");
+    println!("final_max_abs_charge={final_max_abs_charge}");
+    println!("final_mean_abs_charge={final_mean_abs_charge}");
 
     io::stdout().flush().expect("probe stdout should flush");
 }

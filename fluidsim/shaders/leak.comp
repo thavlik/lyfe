@@ -30,6 +30,39 @@ layout(set = 0, binding = 1) readonly buffer LeakChannels {
     LeakChannel channels[];
 };
 
+layout(set = 0, binding = 2) readonly buffer SpeciesCharges {
+    int species_charges[];
+};
+
+const float LEAK_NEUTRALITY_DAMPING = 6.0;
+const float LEAK_BACKPRESSURE_DAMPING = 20.0;
+
+float cell_net_charge(uint cell_idx, uint cell_count) {
+    float net_charge = 0.0;
+    for (uint s = 0; s < species_count; s++) {
+        int z = species_charges[s];
+        if (z == 0) {
+            continue;
+        }
+
+        net_charge += float(z) * conc[s * cell_count + cell_idx];
+    }
+    return net_charge;
+}
+
+float electrochemical_gate(int species_charge, float sink_charge, float source_charge) {
+    if (species_charge == 0) {
+        return 1.0;
+    }
+
+    float residual_imbalance = abs(sink_charge) + abs(source_charge);
+    float opposition = max(float(species_charge) * (source_charge - sink_charge), 0.0);
+    float neutrality_gate = 1.0 / (1.0 + LEAK_NEUTRALITY_DAMPING * residual_imbalance);
+    float backpressure_gate = 1.0 / (1.0 + LEAK_BACKPRESSURE_DAMPING * opposition);
+    float gate = neutrality_gate * backpressure_gate;
+    return gate < 1e-4 ? 0.0 : gate;
+}
+
 void main() {
     uint channel_index = gl_GlobalInvocationID.x;
     if (channel_index >= num_channels) {
@@ -47,10 +80,15 @@ void main() {
 
     uint sink_index = uint(channel.sink_y) * width + uint(channel.sink_x);
     uint source_index = uint(channel.source_y) * width + uint(channel.source_x);
-    uint species_offset = channel.species_index * width * height;
+    uint cell_count = width * height;
+    uint species_offset = channel.species_index * cell_count;
+    int species_charge = species_charges[channel.species_index];
+    float sink_charge = cell_net_charge(sink_index, cell_count);
+    float source_charge = cell_net_charge(source_index, cell_count);
+    float gate = electrochemical_gate(species_charge, sink_charge, source_charge);
 
     float sink_concentration = conc[species_offset + sink_index];
-    float extent = min(channel.rate * sink_concentration * dt, sink_concentration);
+    float extent = min(channel.rate * gate * sink_concentration * dt, sink_concentration);
     if (extent <= 1e-12) {
         return;
     }
