@@ -1,10 +1,10 @@
 /-
-  Enzyme.lean — Generic catalyst-gated rule helpers plus the hexokinase demo.
+  Catalyst.lean — Generic catalyst-gated rule helpers plus the hexokinase demo.
 
   The primitive here models reactions that:
   - consume up to two reactants,
   - produce up to two products,
-  - require a catalyst/enzyme species to be present,
+  - require a catalyst species to be present,
   - do not consume the catalyst.
 -/
 
@@ -13,7 +13,7 @@ import LyfeRules.AcidBase
 
 open LyfeRules
 
-namespace LyfeRules.Enzyme
+namespace LyfeRules.Catalyst
 
 /-- Hexokinase turnover number ($k_{cat}$) near room temperature in s⁻¹. -/
 def hexokinaseTurnoverNumber : Float := 95.0
@@ -28,7 +28,7 @@ def hexokinaseKmAtp : Float := 3.7e-4
 def hexokinaseEffectiveRate : Float := 5.0e-3
 
 /-- Keep the demo thermally neutral until a better parameterization is added. -/
-def enzymeThermalDelta : Float := 0.0
+def catalystThermalDelta : Float := 0.0
 
 def catalyzedTileIds (
   snap : Snapshot
@@ -110,11 +110,11 @@ def evaluate (snap : Snapshot) : Array ReactionRule :=
       hexokinaseEffectiveRate
       (some hexokinaseKmGlucose)
       (some hexokinaseKmAtp)
-      enzymeThermalDelta
-      enzymeThermalDelta
-      enzymeThermalDelta
-      enzymeThermalDelta
+      catalystThermalDelta
+      catalystThermalDelta
+      catalystThermalDelta
+      catalystThermalDelta
       hexokinaseTiles
   rules
 
-end LyfeRules.Enzyme
+end LyfeRules.Catalyst

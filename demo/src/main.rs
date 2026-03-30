@@ -1369,7 +1369,7 @@ impl DemoApp {
         
         // Debug: Log frame presentation
         let step = sim.step_count();
-        if step > 0 && step % 10 == 0 {
+        if step > 0 && step % 100 == 0 {
             log::info!("Frame timing: bind={:.1}ms", 
                 (t1-t0).as_secs_f64()*1000.0);
         }
@@ -1690,7 +1690,7 @@ impl ApplicationHandler for DemoApp {
                 
                 // Log step count periodically
                 if let Some(sim) = &self.simulation {
-                    if sim.step_count() > 0 && sim.step_count() % 10 == 0 {
+                    if sim.step_count() > 0 && sim.step_count() % 100 == 0 {
                         log::info!("Step {}: sim={:.1}ms tooltip={:.1}ms egui={:.1}ms render={:.1}ms total={:.1}ms",
                             sim.step_count(),
                             (t1-t0).as_secs_f64()*1000.0,

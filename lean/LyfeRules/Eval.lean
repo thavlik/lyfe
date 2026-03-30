@@ -7,7 +7,7 @@
 
 import LyfeRules.Types
 import LyfeRules.AcidBase
-import LyfeRules.Enzyme
+import LyfeRules.Catalyst
 
 open LyfeRules
 
@@ -16,7 +16,7 @@ namespace LyfeRules.Eval
 /-- Run all registered rules against the snapshot.
     New rules are added here — no Rust changes required. -/
 def evaluateAll (snap : Snapshot) : EvalResult :=
-  let rules := (AcidBase.evaluate snap) ++ (Enzyme.evaluate snap)
+  let rules := (AcidBase.evaluate snap) ++ (Catalyst.evaluate snap)
   let diags := if rules.isEmpty then
     #["kinetics evaluator: no active rules"]
   else

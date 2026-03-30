@@ -59,7 +59,7 @@ pub enum ReactionKineticsModel {
     MichaelisMenten,
 }
 
-/// Michaelis-Menten parameters for enzyme-gated reactions.
+/// Michaelis-Menten parameters for catalyst-gated reactions.
 #[derive(Debug, Clone)]
 pub struct MichaelisMentenKinetics {
     /// Michaelis constant for reactant A in mol/L.
