@@ -21,7 +21,7 @@ use winit::{
     dpi::PhysicalSize,
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
 };
 
@@ -117,6 +117,7 @@ struct DemoApp {
     // Thermal view (momentary display while T is held)
     thermal_view: bool,
     performance_overlay: bool,
+    modifiers: ModifiersState,
     
     // Timing
     last_frame: Instant,
@@ -148,6 +149,7 @@ impl DemoApp {
             hovered_leak_channel: None,
             thermal_view: false,
             performance_overlay: false,
+            modifiers: ModifiersState::empty(),
             last_frame: Instant::now(),
             frame_count: 0,
             fps_update_time: Instant::now(),
@@ -891,6 +893,10 @@ impl ApplicationHandler for DemoApp {
                     log::error!("Failed to resize: {}", e);
                 }
             }
+
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
             
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Pressed, .. }, .. } => {
                 match logical_key {
@@ -926,7 +932,7 @@ impl ApplicationHandler for DemoApp {
             
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Released, .. }, .. } => {
                 match logical_key {
-                    Key::Character(ref c) if c == "r" || c == "R" => {
+                    Key::Character(ref c) if (c == "r" || c == "R") && self.modifiers.shift_key() => {
                         if let Err(e) = self.reset_simulation() {
                             log::error!("Failed to reset simulation: {}", e);
                         }
