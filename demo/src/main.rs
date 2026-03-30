@@ -162,10 +162,15 @@ impl DemoApp {
     fn initialize(&mut self, window: Window) -> Result<()> {
         let _size = window.inner_size();
         
+        let diffusion_rate = match self.scenario {
+            ScenarioKind::Leak => 7.5,
+            _ => 5.0,
+        };
+
         let config = SimulationConfig {
             width: 512,
             height: 512,
-            diffusion_rate: 5.0,
+            diffusion_rate,
             thermal_diffusion_rate: 3.0,
             charge_correction_strength: 1.0,
             diffusion_substeps: 4,

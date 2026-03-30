@@ -5,8 +5,8 @@
 // Coloring scheme:
 // - Pure water (zero solute): Light blue
 // - Each species gets a pre-computed color from a CPU-side lookup table
-// - 0.5 M concentration = 100% color intensity for that species
-// - Colors are blended with weighted linear interpolation
+// - Lower concentrations are boosted nonlinearly so transient streams remain visible
+// - Colors are blended with weighted interpolation biased toward visible streaks
 
 layout(location = 0) in vec2 fragUV;
 layout(location = 0) out vec4 outColor;
@@ -132,17 +132,21 @@ void main() {
         return;
     }
     
-    // Fluid cell - blend species colors based on concentration
-    // 0.5 M = 100% weight for that species color
+    // Fluid cell - blend species colors based on concentration.
+    // Use a two-part nonlinear response so faint plumes remain visible while
+    // dense regions continue to pull harder toward species color.
     vec3 species_blend = vec3(0.0);
     float total_conc = 0.0;
     
     for (uint s = 0; s < min(species_count, 16u); s++) {
         float conc = concentrations[s * cell_count + cell_index];
         if (conc > 0.0) {
-            // 0.5 M should already read as full-intensity species color.
-            // Clamp to reasonable range for visualization
-            float weight = min(conc * 2.0, 2.0);
+            // Lift low concentrations harder out of the background, then add a
+            // steeper high-end term so concentrated regions retain contrast.
+            float scaled = conc / 0.18;
+            float low_visibility = pow(clamp(scaled, 0.0, 1.0), 0.22) * 2.2;
+            float high_visibility = pow(clamp(scaled / 2.5, 0.0, 1.0), 2.2) * 2.8;
+            float weight = min(low_visibility + high_visibility, 5.2);
             species_blend += species_colors[s].rgb * weight;
             total_conc += weight;
         }
@@ -155,9 +159,10 @@ void main() {
     if (total_conc > 0.001) {
         // Normalize species blend
         vec3 normalized_species = species_blend / total_conc;
-        // Blend factor: how much species color vs water color
-        // At 0.5 M total, we want about 50% species color
-        float blend_factor = 1.0 - exp(-total_conc * 0.5);
+        // Keep the water tint at very low concentration, but drive toward species
+        // color faster once the weighted concentration starts to accumulate.
+        float blend_factor = 1.0 - exp(-total_conc * 1.55);
+        blend_factor = pow(clamp(blend_factor, 0.0, 1.0), 0.56);
         final_color = mix(WATER_COLOR, normalized_species, blend_factor);
     } else {
         final_color = WATER_COLOR;
