@@ -607,14 +607,14 @@ pub fn create_leak_scenario(width: u32, height: u32) -> Scenario {
     for i in 0..channel_count {
         let y = inner_y0 + ((i + 1) * (inner_y1 - inner_y0) / (channel_count + 1));
         builder.leak_channels.push(LeakChannel::new(
-            2.0,
+            4.5,
             k_id,
             (inner_x0 - 1) as i32,
             y as i32,
             0,
         ));
         builder.leak_channels.push(LeakChannel::new(
-            2.0,
+            4.5,
             na_id,
             inner_x1 as i32,
             y as i32,

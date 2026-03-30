@@ -34,8 +34,8 @@ layout(set = 0, binding = 2) readonly buffer SpeciesCharges {
     int species_charges[];
 };
 
-const float LEAK_NEUTRALITY_DAMPING = 6.0;
-const float LEAK_BACKPRESSURE_DAMPING = 20.0;
+const float LEAK_NEUTRALITY_DAMPING = 8.0;
+const float LEAK_BACKPRESSURE_DAMPING = 28.0;
 
 float cell_net_charge(uint cell_idx, uint cell_count) {
     float net_charge = 0.0;

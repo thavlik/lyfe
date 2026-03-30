@@ -45,8 +45,9 @@ layout(set = 0, binding = 4) readonly buffer Temperatures {
     float temperatures[];
 };
 
-// Pure water color (light blue)
-const vec3 WATER_COLOR = vec3(0.7, 0.85, 0.95);
+// Pure water color (deeper blue so ionic plumes have more contrast)
+const vec3 WATER_COLOR = vec3(0.12, 0.2, 0.32);
+const float VISIBLE_CONCENTRATION_FLOOR = 0.004;
 
 // Solid titanium color
 const vec3 TITANIUM_COLOR = vec3(0.6, 0.6, 0.65);
@@ -136,19 +137,27 @@ void main() {
     // Use a two-part nonlinear response so faint plumes remain visible while
     // dense regions continue to pull harder toward species color.
     vec3 species_blend = vec3(0.0);
-    float total_conc = 0.0;
+    float total_weight = 0.0;
+    float strongest_weight = 0.0;
+    vec3 strongest_color = WATER_COLOR;
     
     for (uint s = 0; s < min(species_count, 16u); s++) {
         float conc = concentrations[s * cell_count + cell_index];
-        if (conc > 0.0) {
+        if (conc > VISIBLE_CONCENTRATION_FLOOR) {
             // Lift low concentrations harder out of the background, then add a
             // steeper high-end term so concentrated regions retain contrast.
-            float scaled = conc / 0.18;
-            float low_visibility = pow(clamp(scaled, 0.0, 1.0), 0.22) * 2.2;
-            float high_visibility = pow(clamp(scaled / 2.5, 0.0, 1.0), 2.2) * 2.8;
-            float weight = min(low_visibility + high_visibility, 5.2);
+            float visible_conc = conc - VISIBLE_CONCENTRATION_FLOOR;
+            float scaled = visible_conc / 0.09;
+            float low_visibility = pow(clamp(scaled, 0.0, 1.0), 0.24) * 2.8;
+            float mid_visibility = pow(clamp(visible_conc / 0.28, 0.0, 1.0), 0.72) * 1.9;
+            float high_visibility = pow(clamp(visible_conc / 1.0, 0.0, 1.0), 1.9) * 3.2;
+            float weight = min(low_visibility + mid_visibility + high_visibility, 6.8);
             species_blend += species_colors[s].rgb * weight;
-            total_conc += weight;
+            total_weight += weight;
+            if (weight > strongest_weight) {
+                strongest_weight = weight;
+                strongest_color = species_colors[s].rgb;
+            }
         }
     }
     
@@ -156,14 +165,17 @@ void main() {
     // At 0 total concentration: 100% water color
     // As concentration increases: blend toward species colors
     vec3 final_color;
-    if (total_conc > 0.001) {
-        // Normalize species blend
-        vec3 normalized_species = species_blend / total_conc;
-        // Keep the water tint at very low concentration, but drive toward species
-        // color faster once the weighted concentration starts to accumulate.
-        float blend_factor = 1.0 - exp(-total_conc * 1.55);
-        blend_factor = pow(clamp(blend_factor, 0.0, 1.0), 0.56);
-        final_color = mix(WATER_COLOR, normalized_species, blend_factor);
+    if (total_weight > 0.001) {
+        vec3 normalized_species = species_blend / total_weight;
+        float dominance = strongest_weight / total_weight;
+        float dominance_emphasis = smoothstep(0.58, 0.86, dominance);
+        vec3 emphasized_species = mix(normalized_species, strongest_color, dominance_emphasis);
+        float blend_factor = 1.0 - exp(-total_weight * 1.9);
+        blend_factor = pow(clamp(blend_factor, 0.0, 1.0), 0.42);
+        final_color = mix(WATER_COLOR, emphasized_species, blend_factor);
+        final_color = pow(final_color, vec3(0.82));
+        final_color += emphasized_species * max(strongest_weight - 2.5, 0.0) * 0.012;
+        final_color = clamp(final_color, 0.0, 1.0);
     } else {
         final_color = WATER_COLOR;
     }

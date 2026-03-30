@@ -166,6 +166,14 @@ impl DemoApp {
             ScenarioKind::Leak => 7.5,
             _ => 5.0,
         };
+        let time_scale = match self.scenario {
+            ScenarioKind::Leak => 24.0,
+            _ => 20.0,
+        };
+        let diffusion_substeps = match self.scenario {
+            ScenarioKind::Leak => 4,
+            _ => 4,
+        };
         let charge_correction_strength = match self.scenario {
             ScenarioKind::Leak => 0.0,
             _ => 1.0,
@@ -177,9 +185,9 @@ impl DemoApp {
             diffusion_rate,
             thermal_diffusion_rate: 3.0,
             charge_correction_strength,
-            diffusion_substeps: 4,
+            diffusion_substeps,
             inspection_mip: self.inspection_mip,
-            time_scale: 20.0,
+            time_scale,
             reaction_rate_scale: 8.0,
             max_frame_dt: 1.0 / 15.0,
         };
@@ -1060,15 +1068,15 @@ fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]>
 
     // Explicit color assignments for known species (RGB, visually distinct from water blue)
     let overrides: HashMap<&str, [f32; 3]> = HashMap::from([
-        ("Na+", [0.95, 0.3, 0.2]),   // Red-orange
-        ("K+",  [0.2, 0.85, 0.3]),   // Green
-        ("Cl-", [0.85, 0.7, 0.2]),   // Gold/yellow
-        ("H+",  [1.0, 0.4, 0.7]),    // Pink
-        ("OH-", [0.6, 0.2, 0.9]),    // Purple
-        ("Ca2+",[0.9, 0.6, 0.1]),    // Orange
-        ("SO4(2-)", [0.3, 0.7, 0.9]),// Teal
-        ("CH3COOH", [0.45, 0.9, 0.55]), // Mint green
-        ("CH3COO-", [0.9, 0.55, 0.15]), // Amber
+        ("Na+", [1.0, 0.22, 0.08]),     // Hot orange-red
+        ("K+",  [0.12, 0.92, 0.22]),    // Electric green
+        ("Cl-", [1.0, 0.86, 0.08]),     // Acid yellow
+        ("H+",  [1.0, 0.14, 0.58]),     // Magenta
+        ("OH-", [0.38, 0.18, 1.0]),     // Vivid violet
+        ("Ca2+",[1.0, 0.52, 0.06]),     // Burning orange
+        ("SO4(2-)", [0.05, 0.82, 0.92]),// Bright cyan
+        ("CH3COOH", [0.22, 0.95, 0.66]), // Neon mint
+        ("CH3COO-", [1.0, 0.62, 0.12]), // Amber
     ]);
 
     registry.iter().map(|info| {
@@ -1083,10 +1091,9 @@ fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]>
                 h = (h + 0.17).fract();
             }
             let rgb = hue_to_rgb(h);
-            // Slightly desaturate
-            let r = 0.5 + (rgb[0] - 0.5) * 0.85;
-            let g = 0.5 + (rgb[1] - 0.5) * 0.85;
-            let b = 0.5 + (rgb[2] - 0.5) * 0.85;
+            let r = 0.5 + (rgb[0] - 0.5) * 1.1;
+            let g = 0.5 + (rgb[1] - 0.5) * 1.1;
+            let b = 0.5 + (rgb[2] - 0.5) * 1.1;
             [r, g, b, 1.0]
         }
     }).collect()
