@@ -675,7 +675,7 @@ impl DemoApp {
     fn draw_editor_ui(&mut self, ctx: &egui::Context) {
         use egui::{Align2, Color32, Frame, Margin, RichText, Stroke};
 
-        egui::Area::new("entity_create_button".into())
+        egui::Area::new("simulation_controls".into())
             .anchor(Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
             .show(ctx, |ui| {
                 Frame::none()
@@ -683,6 +683,23 @@ impl DemoApp {
                     .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 32)))
                     .inner_margin(Margin::same(8.0))
                     .show(ui, |ui| {
+                        let paused = self.simulation.as_ref()
+                            .map(|sim| sim.is_paused())
+                            .unwrap_or(false);
+
+                        if ui.button(RichText::new(if paused { "PLAY" } else { "PAUSE" }).strong()).clicked() {
+                            if let Some(sim) = self.simulation.as_mut() {
+                                sim.toggle_pause();
+                                log::info!("Simulation {}", if sim.is_paused() { "paused" } else { "resumed" });
+                            }
+                        }
+
+                        if ui.button(RichText::new("RESTART").strong()).clicked() {
+                            if let Err(error) = self.reset_simulation() {
+                                log::error!("Failed to restart simulation: {}", error);
+                            }
+                        }
+
                         if ui.button(RichText::new("CREATE").strong()).clicked() {
                             self.create_menu_open = true;
                         }
