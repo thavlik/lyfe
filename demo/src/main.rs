@@ -161,48 +161,13 @@ impl DemoApp {
 
     fn initialize(&mut self, window: Window) -> Result<()> {
         let _size = window.inner_size();
-        
-        let diffusion_rate = match self.scenario {
-            ScenarioKind::Leak => 7.5,
-            _ => 5.0,
-        };
-        let time_scale = match self.scenario {
-            ScenarioKind::Leak => 24.0,
-            _ => 20.0,
-        };
-        let diffusion_substeps = match self.scenario {
-            ScenarioKind::Leak => 4,
-            _ => 4,
-        };
-        let charge_correction_strength = match self.scenario {
-            ScenarioKind::Leak => 0.0,
-            _ => 1.0,
-        };
-
-        let config = SimulationConfig {
-            width: 512,
-            height: 512,
-            diffusion_rate,
-            thermal_diffusion_rate: 3.0,
-            charge_correction_strength,
-            diffusion_substeps,
-            inspection_mip: self.inspection_mip,
-            time_scale,
-            reaction_rate_scale: 8.0,
-            max_frame_dt: 1.0 / 15.0,
-        };
 
         log::info!("Creating render context...");
         let render_ctx = RenderContext::new(&window)?;
         log::info!("Render context created successfully");
 
         log::info!("Creating simulation on shared Vulkan device...");
-        let simulation = match self.scenario {
-            ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
-            ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
-            ScenarioKind::Buffers => Simulation::new_buffers_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
-            ScenarioKind::Leak => Simulation::new_leak_with_shared_gpu_context(config, render_ctx.shared_gpu_context())?,
-        };
+        let simulation = self.create_simulation(&render_ctx)?;
         log::info!("Simulation created successfully");
         
         log::info!("Creating render pipeline...");
@@ -239,6 +204,73 @@ impl DemoApp {
         self.simulation = Some(simulation);
         self.species_names = species_names;
         
+        Ok(())
+    }
+
+    fn simulation_config(&self) -> SimulationConfig {
+        let diffusion_rate = match self.scenario {
+            ScenarioKind::Leak => 7.5,
+            _ => 5.0,
+        };
+        let time_scale = match self.scenario {
+            ScenarioKind::Leak => 24.0,
+            _ => 20.0,
+        };
+        let diffusion_substeps = match self.scenario {
+            ScenarioKind::Leak => 4,
+            _ => 4,
+        };
+        let charge_correction_strength = match self.scenario {
+            ScenarioKind::Leak => 0.0,
+            _ => 1.0,
+        };
+
+        SimulationConfig {
+            width: 512,
+            height: 512,
+            diffusion_rate,
+            thermal_diffusion_rate: 3.0,
+            charge_correction_strength,
+            diffusion_substeps,
+            inspection_mip: self.inspection_mip,
+            time_scale,
+            reaction_rate_scale: 8.0,
+            max_frame_dt: 1.0 / 15.0,
+        }
+    }
+
+    fn create_simulation(&self, render_ctx: &RenderContext) -> Result<Simulation> {
+        let config = self.simulation_config();
+        let context = render_ctx.shared_gpu_context();
+        let mut simulation = match self.scenario {
+            ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, context)?,
+            ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, context)?,
+            ScenarioKind::Buffers => Simulation::new_buffers_with_shared_gpu_context(config, context)?,
+            ScenarioKind::Leak => Simulation::new_leak_with_shared_gpu_context(config, context)?,
+        };
+        simulation.set_async_inspection_interval(TOOLTIP_REFRESH_INTERVAL);
+        Ok(simulation)
+    }
+
+    fn reset_simulation(&mut self) -> Result<()> {
+        let render_ctx = self.render_ctx.as_ref().unwrap();
+        unsafe {
+            render_ctx.device.device_wait_idle()?;
+        }
+
+        let simulation = self.create_simulation(render_ctx)?;
+        self.species_names = simulation.species_registry()
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect();
+        self.simulation = Some(simulation);
+        self.show_tooltip = false;
+        self.tooltip_text.clear();
+        self.last_tooltip_coord = None;
+        self.hovered_leak_channel = None;
+        self.last_frame = Instant::now();
+
+        log::info!("Simulation reset ({:?} scenario)", self.scenario);
         Ok(())
     }
 
@@ -894,6 +926,14 @@ impl ApplicationHandler for DemoApp {
             
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Released, .. }, .. } => {
                 match logical_key {
+                    Key::Character(ref c) if c == "r" || c == "R" => {
+                        if let Err(e) = self.reset_simulation() {
+                            log::error!("Failed to reset simulation: {}", e);
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                     Key::Character(ref c) if c == "t" || c == "T" => {
                         self.thermal_view = false;
                     }
