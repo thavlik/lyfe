@@ -1730,30 +1730,37 @@ impl ApplicationHandler for DemoApp {
 impl Drop for DemoApp {
     fn drop(&mut self) {
         log::info!("DemoApp::drop - starting cleanup");
-        // Wait for GPU to be idle before cleanup
-        if let Some(ctx) = &self.render_ctx {
+        let window = self.window.take();
+        let mut render_ctx = self.render_ctx.take();
+        let mut render_pipeline = self.render_pipeline.take();
+        let egui_renderer = self.egui_renderer.take();
+        let simulation = self.simulation.take();
+
+        // Keep the window and render context alive while GPU-backed resources are released.
+        if let Some(ctx) = &render_ctx {
             unsafe { ctx.device.device_wait_idle().ok(); }
         }
         log::info!("DemoApp::drop - GPU idle");
         
-        // Drop simulation first (it has Vulkan resources from its own device)
-        drop(self.simulation.take());
+        // Drop simulation first; in shared-context mode it borrows the renderer's device/allocator.
+        drop(simulation);
         log::info!("DemoApp::drop - simulation dropped");
         
-        // Drop egui_renderer before render_ctx (it holds a cloned Device handle)
-        drop(self.egui_renderer.take());
+        // Drop egui renderer before tearing down the render context.
+        drop(egui_renderer);
         log::info!("DemoApp::drop - egui_renderer dropped");
         
-        // Clean up render pipeline before render context is dropped
-        // Order matters: pipeline uses ctx's allocator
-        if let (Some(pipeline), Some(ctx)) = (self.render_pipeline.as_mut(), self.render_ctx.as_ref()) {
+        // Clean up the render pipeline while the render context is still alive.
+        if let (Some(pipeline), Some(ctx)) = (render_pipeline.as_mut(), render_ctx.as_ref()) {
             log::info!("Cleaning up render pipeline...");
             pipeline.destroy(ctx);
         }
         log::info!("DemoApp::drop - pipeline destroyed");
         
-        // Now it's safe to drop the render_ctx and other resources
-        log::info!("DemoApp::drop - cleanup complete, dropping remaining fields");
+        drop(render_pipeline);
+        drop(render_ctx.take());
+        drop(window);
+        log::info!("DemoApp::drop - cleanup complete");
     }
 }
 
