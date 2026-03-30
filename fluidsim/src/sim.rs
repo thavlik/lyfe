@@ -628,7 +628,7 @@ impl Simulation {
 
     pub fn hovered_leak_channel(&self, grid_x: f32, grid_y: f32) -> Option<usize> {
         self.leak_channels.iter().position(|channel| {
-            channel.contains_grid_point(grid_x, grid_y, 2.6, 1.3)
+            channel.contains_grid_point(grid_x, grid_y, 3.2, 1.8)
         })
     }
 

@@ -1037,7 +1037,7 @@ impl DemoApp {
             } else {
                 egui::Color32::from_rgb(18, 22, 28)
             };
-            let line_color = if overlay.ghost {
+            let flow_color = if overlay.ghost {
                 if overlay.valid {
                     egui::Color32::from_rgba_unmultiplied(overlay.color.r(), overlay.color.g(), overlay.color.b(), 170)
                 } else {
@@ -1046,41 +1046,95 @@ impl DemoApp {
             } else {
                 overlay.color
             };
-            let backbone_color = if overlay.ghost {
+            let shell_fill = if overlay.ghost {
+                if overlay.valid {
+                    egui::Color32::from_rgba_unmultiplied(242, 239, 228, 176)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(255, 214, 214, 176)
+                }
+            } else {
+                egui::Color32::from_rgba_unmultiplied(246, 242, 232, 236)
+            };
+            let shadow_color = if overlay.ghost {
                 egui::Color32::from_rgba_unmultiplied(14, 18, 24, 120)
             } else {
                 egui::Color32::from_rgba_unmultiplied(14, 18, 24, 210)
             };
-
-            painter.line_segment(
-                [overlay.sink, overlay.source],
-                egui::Stroke::new(if overlay.selected { 6.0 } else { 5.0 }, backbone_color),
-            );
-            painter.circle_filled(overlay.center, 8.5, egui::Color32::from_rgba_unmultiplied(236, 240, 245, 210));
-            painter.circle_stroke(
-                overlay.center,
-                8.5,
-                egui::Stroke::new(if overlay.selected || overlay.hovered { 3.0 } else { 2.0 }, outline),
-            );
-            painter.circle_filled(overlay.center, 4.2, line_color);
+            let band_color = if overlay.selected || overlay.hovered {
+                outline
+            } else if overlay.ghost {
+                egui::Color32::from_rgba_unmultiplied(42, 48, 56, 136)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(34, 40, 48, 220)
+            };
+            let highlight = if overlay.ghost {
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 120)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 185)
+            };
 
             let delta = egui::vec2(overlay.source.x - overlay.sink.x, overlay.source.y - overlay.sink.y);
             let tangent = if delta.length_sq() > 0.0 { delta.normalized() } else { egui::vec2(1.0, 0.0) };
             let normal = egui::vec2(-tangent.y, tangent.x);
-            let left_top = overlay.center - tangent * 10.0 + normal * 5.0;
-            let left_bottom = overlay.center - tangent * 10.0 - normal * 5.0;
-            let right_top = overlay.center + tangent * 10.0 + normal * 5.0;
-            let right_bottom = overlay.center + tangent * 10.0 - normal * 5.0;
-            painter.line_segment([left_top, left_bottom], egui::Stroke::new(2.0, outline));
-            painter.line_segment([right_top, right_bottom], egui::Stroke::new(2.0, outline));
+            let half_span = (delta.length() * 0.5).max(14.0);
+            let body_half_length = (half_span * 0.78).clamp(14.0, 28.0);
+            let body_half_width = if overlay.selected {
+                9.5
+            } else if overlay.hovered {
+                8.75
+            } else {
+                8.0
+            };
+            let capsule_start = overlay.center - tangent * body_half_length;
+            let capsule_end = overlay.center + tangent * body_half_length;
+            let stripe_start = capsule_start + tangent * (body_half_length * 0.18);
+            let stripe_end = capsule_end - tangent * (body_half_length * 0.34);
+            let highlight_offset = normal * (body_half_width * 0.28);
+            let highlight_start = capsule_start + tangent * (body_half_length * 0.24) + highlight_offset;
+            let highlight_end = capsule_end - tangent * (body_half_length * 0.58) + highlight_offset;
 
-            let arrow_base = overlay.center + tangent * 8.0;
-            let arrow_tip = overlay.source;
-            let arrow_left = arrow_base - tangent * 5.5 + normal * 3.5;
-            let arrow_right = arrow_base - tangent * 5.5 - normal * 3.5;
-            painter.line_segment([arrow_base, arrow_tip], egui::Stroke::new(2.0, line_color));
-            painter.line_segment([arrow_tip, arrow_left], egui::Stroke::new(2.0, line_color));
-            painter.line_segment([arrow_tip, arrow_right], egui::Stroke::new(2.0, line_color));
+            painter.line_segment(
+                [capsule_start, capsule_end],
+                egui::Stroke::new(body_half_width * 2.0 + 6.0, shadow_color),
+            );
+            painter.line_segment(
+                [capsule_start, capsule_end],
+                egui::Stroke::new(body_half_width * 2.0 + 2.5, outline),
+            );
+            painter.line_segment(
+                [capsule_start, capsule_end],
+                egui::Stroke::new(body_half_width * 2.0, shell_fill),
+            );
+            painter.line_segment(
+                [stripe_start, stripe_end],
+                egui::Stroke::new(body_half_width * 1.05, flow_color),
+            );
+            painter.line_segment(
+                [highlight_start, highlight_end],
+                egui::Stroke::new(2.0, highlight),
+            );
+
+            for band_offset in [-0.42_f32, 0.18_f32] {
+                let band_center = overlay.center + tangent * (body_half_length * band_offset);
+                let band_half = normal * (body_half_width * 0.82);
+                painter.line_segment(
+                    [band_center - band_half, band_center + band_half],
+                    egui::Stroke::new(2.0, band_color),
+                );
+            }
+
+            let arrow_tip = capsule_end + tangent * (body_half_width + 7.0);
+            let arrow_base = capsule_end - tangent * (body_half_width * 0.15);
+            let arrow_half_width = body_half_width * 0.9;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    arrow_tip,
+                    arrow_base + normal * arrow_half_width,
+                    arrow_base - normal * arrow_half_width,
+                ],
+                flow_color,
+                egui::Stroke::new(if overlay.selected || overlay.hovered { 2.5 } else { 1.8 }, outline),
+            ));
         }
     }
 
