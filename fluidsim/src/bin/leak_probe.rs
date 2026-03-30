@@ -23,13 +23,21 @@ fn region_total(
     total
 }
 
+fn fluid_total(values: &[f32], solid_mask: &[u32]) -> f32 {
+    values
+        .iter()
+        .zip(solid_mask.iter())
+        .filter_map(|(value, mask)| (*mask == 0).then_some(*value))
+        .sum()
+}
+
 fn main() {
     let config = SimulationConfig {
         width: 128,
         height: 128,
         diffusion_rate: 5.0,
         thermal_diffusion_rate: 3.0,
-        charge_correction_strength: 1.0,
+        charge_correction_strength: 0.0,
         diffusion_substeps: 4,
         inspection_mip: 8,
         time_scale: 20.0,
@@ -43,6 +51,7 @@ fn main() {
 
     let k_idx = simulation.species_registry().index_of_name("K+").expect("K+ registered");
     let na_idx = simulation.species_registry().index_of_name("Na+").expect("Na+ registered");
+    let cl_idx = simulation.species_registry().index_of_name("Cl-").expect("Cl- registered");
 
     let wall_thickness = 4u32;
     let inner_size = (width.min(height) / 2).max(64);
@@ -59,6 +68,10 @@ fn main() {
     let inner_y1 = outer_y1 - wall_thickness;
 
     let initial = simulation.render_state().expect("initial render state");
+    let initial_k_total = fluid_total(&initial.concentrations[k_idx], &initial.solid_mask);
+    let initial_na_total = fluid_total(&initial.concentrations[na_idx], &initial.solid_mask);
+    let initial_cl_total = fluid_total(&initial.concentrations[cl_idx], &initial.solid_mask);
+    let initial_spectator_charge = initial_k_total + initial_na_total - initial_cl_total;
     let initial_k_inside = region_total(
         &initial.concentrations[k_idx],
         &initial.solid_mask,
@@ -107,6 +120,10 @@ fn main() {
     }
 
     let final_state = simulation.render_state().expect("final render state");
+    let final_k_total = fluid_total(&final_state.concentrations[k_idx], &final_state.solid_mask);
+    let final_na_total = fluid_total(&final_state.concentrations[na_idx], &final_state.solid_mask);
+    let final_cl_total = fluid_total(&final_state.concentrations[cl_idx], &final_state.solid_mask);
+    let final_spectator_charge = final_k_total + final_na_total - final_cl_total;
     let final_k_inside = region_total(
         &final_state.concentrations[k_idx],
         &final_state.solid_mask,
@@ -152,8 +169,16 @@ fn main() {
 
     println!("initial_k_inside={initial_k_inside}");
     println!("initial_na_outside={initial_na_outside}");
+    println!("initial_k_total={initial_k_total}");
+    println!("initial_na_total={initial_na_total}");
+    println!("initial_cl_total={initial_cl_total}");
+    println!("initial_spectator_charge={initial_spectator_charge}");
     println!("final_k_inside={final_k_inside}");
     println!("final_na_outside={final_na_outside}");
+    println!("final_k_total={final_k_total}");
+    println!("final_na_total={final_na_total}");
+    println!("final_cl_total={final_cl_total}");
+    println!("final_spectator_charge={final_spectator_charge}");
 
     io::stdout().flush().expect("probe stdout should flush");
 }

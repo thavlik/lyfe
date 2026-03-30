@@ -166,13 +166,17 @@ impl DemoApp {
             ScenarioKind::Leak => 7.5,
             _ => 5.0,
         };
+        let charge_correction_strength = match self.scenario {
+            ScenarioKind::Leak => 0.0,
+            _ => 1.0,
+        };
 
         let config = SimulationConfig {
             width: 512,
             height: 512,
             diffusion_rate,
             thermal_diffusion_rate: 3.0,
-            charge_correction_strength: 1.0,
+            charge_correction_strength,
             diffusion_substeps: 4,
             inspection_mip: self.inspection_mip,
             time_scale: 20.0,

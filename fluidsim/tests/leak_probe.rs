@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+const CONSERVATION_TOLERANCE: f32 = 0.1;
+
 fn parse_probe_output(stdout: &str) -> HashMap<String, f32> {
     stdout
         .lines()
@@ -29,8 +31,16 @@ fn leak_channels_move_k_inward_and_na_outward() {
     let metrics = parse_probe_output(&String::from_utf8_lossy(&output.stdout));
     let initial_k_inside = metrics["initial_k_inside"];
     let initial_na_outside = metrics["initial_na_outside"];
+    let initial_k_total = metrics["initial_k_total"];
+    let initial_na_total = metrics["initial_na_total"];
+    let initial_cl_total = metrics["initial_cl_total"];
+    let initial_spectator_charge = metrics["initial_spectator_charge"];
     let final_k_inside = metrics["final_k_inside"];
     let final_na_outside = metrics["final_na_outside"];
+    let final_k_total = metrics["final_k_total"];
+    let final_na_total = metrics["final_na_total"];
+    let final_cl_total = metrics["final_cl_total"];
+    let final_spectator_charge = metrics["final_spectator_charge"];
 
     assert!(
         final_k_inside > initial_k_inside,
@@ -39,5 +49,21 @@ fn leak_channels_move_k_inward_and_na_outward() {
     assert!(
         final_na_outside > initial_na_outside,
         "expected outward Na+ leak: initial={initial_na_outside}, final={final_na_outside}"
+    );
+    assert!(
+        (final_k_total - initial_k_total).abs() < CONSERVATION_TOLERANCE,
+        "expected K+ mass conservation: initial={initial_k_total}, final={final_k_total}"
+    );
+    assert!(
+        (final_na_total - initial_na_total).abs() < CONSERVATION_TOLERANCE,
+        "expected Na+ mass conservation: initial={initial_na_total}, final={final_na_total}"
+    );
+    assert!(
+        (final_cl_total - initial_cl_total).abs() < CONSERVATION_TOLERANCE,
+        "expected Cl- mass conservation: initial={initial_cl_total}, final={final_cl_total}"
+    );
+    assert!(
+        (final_spectator_charge - initial_spectator_charge).abs() < CONSERVATION_TOLERANCE,
+        "expected spectator charge conservation: initial={initial_spectator_charge}, final={final_spectator_charge}"
     );
 }

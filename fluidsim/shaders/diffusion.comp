@@ -2,8 +2,11 @@
 
 // Diffusion compute shader for species transport
 //
-// This shader performs one step of the diffusion equation:
-//   c_new[i] = c[i] + D * dt * sum(c[neighbor] - c[i]) for each fluid neighbor
+// This shader performs one step of the diffusion equation with an added
+// charge-disparity boost for ionic species:
+//   c_new[i] = c[i] + D * dt * sum(edge_scale * (c_neighbor - c_i))
+// When adjacent cells differ in net charge, we increase the diffusive coupling
+// across that edge so local charge pockets relax faster without destroying mass.
 //
 // Layout: [species][cell] where cell = y * width + x
 // Dispatch: (ceil(cell_count / 256), species_count, 1)
@@ -46,6 +49,36 @@ layout(set = 0, binding = 4) readonly buffer SpeciesCharges {
     int species_charges[];
 };
 
+const float CHARGE_RELAXATION_BOOST = 2.0;
+const float MAX_EDGE_SCALE = 3.0;
+
+float cell_net_charge(uint cell_idx, uint cell_count) {
+    float net_charge = 0.0;
+    for (uint s = 0; s < species_count; s++) {
+        int z = species_charges[s];
+        if (z == 0) {
+            continue;
+        }
+
+        net_charge += float(z) * src_conc[s * cell_count + cell_idx];
+    }
+    return net_charge;
+}
+
+float edge_charge_scale(
+    int species_charge,
+    float current_net_charge,
+    float neighbor_net_charge
+) {
+    if (species_charge == 0) {
+        return 1.0;
+    }
+
+    float charge_disparity = abs(neighbor_net_charge - current_net_charge);
+    float boost = 1.0 + CHARGE_RELAXATION_BOOST * min(charge_disparity, 1.0);
+    return min(boost, MAX_EDGE_SCALE);
+}
+
 void main() {
     uint cell_index = gl_GlobalInvocationID.x;
     uint species_idx = gl_WorkGroupID.y;
@@ -78,6 +111,7 @@ void main() {
         ? 1.0
         : (1.0 / max(float(abs(z)), 1.0));
     D *= charge_mobility_scale;
+    float current_net_charge = cell_net_charge(cell_index, cell_count);
     
     // Accumulate flux from neighbors (4-connected)
     float flux = 0.0;
@@ -88,7 +122,9 @@ void main() {
         uint left_idx = cell_index - 1;
         if (solid_mask[left_idx] == 0) {
             float c_left = src_conc[species_idx * cell_count + left_idx];
-            flux += c_left - c;
+            float left_net_charge = cell_net_charge(left_idx, cell_count);
+            float edge_scale = edge_charge_scale(z, current_net_charge, left_net_charge);
+            flux += (c_left - c) * edge_scale;
             neighbor_count++;
         }
     }
@@ -98,7 +134,9 @@ void main() {
         uint right_idx = cell_index + 1;
         if (solid_mask[right_idx] == 0) {
             float c_right = src_conc[species_idx * cell_count + right_idx];
-            flux += c_right - c;
+            float right_net_charge = cell_net_charge(right_idx, cell_count);
+            float edge_scale = edge_charge_scale(z, current_net_charge, right_net_charge);
+            flux += (c_right - c) * edge_scale;
             neighbor_count++;
         }
     }
@@ -108,7 +146,9 @@ void main() {
         uint top_idx = cell_index - width;
         if (solid_mask[top_idx] == 0) {
             float c_top = src_conc[species_idx * cell_count + top_idx];
-            flux += c_top - c;
+            float top_net_charge = cell_net_charge(top_idx, cell_count);
+            float edge_scale = edge_charge_scale(z, current_net_charge, top_net_charge);
+            flux += (c_top - c) * edge_scale;
             neighbor_count++;
         }
     }
@@ -118,7 +158,9 @@ void main() {
         uint bottom_idx = cell_index + width;
         if (solid_mask[bottom_idx] == 0) {
             float c_bottom = src_conc[species_idx * cell_count + bottom_idx];
-            flux += c_bottom - c;
+            float bottom_net_charge = cell_net_charge(bottom_idx, cell_count);
+            float edge_scale = edge_charge_scale(z, current_net_charge, bottom_net_charge);
+            flux += (c_bottom - c) * edge_scale;
             neighbor_count++;
         }
     }

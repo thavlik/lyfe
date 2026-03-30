@@ -584,11 +584,11 @@ pub fn create_leak_scenario(width: u32, height: u32) -> Scenario {
                 builder.initial_concentrations
                     .entry(index)
                     .or_default()
-                    .set(acetate_id, 0.35);
+                    .set(acetate_id, 0.350018);
                 builder.initial_concentrations
                     .entry(index)
                     .or_default()
-                    .set(acetic_acid_id, 0.35);
+                    .set(acetic_acid_id, 0.349982);
             } else {
                 builder.initial_concentrations
                     .entry(index)

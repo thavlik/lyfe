@@ -144,9 +144,18 @@ pub struct Simulation {
     inspection_readbacks_enabled: bool,
 }
 
+fn effective_charge_correction_strength(configured_strength: f32, leak_channels: &[LeakChannel]) -> f32 {
+    if leak_channels.is_empty() {
+        configured_strength
+    } else {
+        0.0
+    }
+}
+
 impl Simulation {
     const MIN_KINETICS_INTERVAL_SECONDS: f64 = 1.0;
     const MAX_KINETICS_INTERVAL_SECONDS: f64 = 30.0;
+    const MAX_CHARGE_RELAXATION_DIFFUSION_SCALE: f32 = 3.0;
 
     /// Create a new simulation from a scenario.
     pub fn from_scenario(scenario: Scenario, config: SimulationConfig) -> Result<Self> {
@@ -385,7 +394,8 @@ impl Simulation {
         let dt_sim = wall_dt * self.config.time_scale;
 
         let species_d = self.config.diffusion_rate
-            * self.species_registry.max_diffusion_coefficient().max(1.0);
+            * self.species_registry.max_diffusion_coefficient().max(1.0)
+            * Self::MAX_CHARGE_RELAXATION_DIFFUSION_SCALE;
         let max_d = species_d.max(self.config.thermal_diffusion_rate.max(0.0));
         let cfl_substeps = if max_d > 0.0 {
             ((max_d * dt_sim / 0.2).ceil() as u32).max(1)
@@ -420,7 +430,10 @@ impl Simulation {
             substeps,
             substep_dt,
             diffusion_rate: self.config.diffusion_rate,
-            charge_correction_strength: self.config.charge_correction_strength,
+            charge_correction_strength: effective_charge_correction_strength(
+                self.config.charge_correction_strength,
+                &self.leak_channels,
+            ),
             reaction_dt: dt_sim,
             thermal_diffusivity: self.config.thermal_diffusion_rate,
         })
