@@ -11,7 +11,7 @@ use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
 use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
 use crate::leak::LeakChannel;
-use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario, create_leak_scenario};
+use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario, create_enzyme_scenario, create_leak_scenario};
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
@@ -232,7 +232,7 @@ impl Simulation {
             time: 0.0,
             step_count: 0,
             paused: false,
-            kinetics: KineticsIntegration::new().ok(),
+            kinetics: Some(KineticsIntegration::new()?),
             update_applicator: SemanticUpdateApplicator::new(reaction_rate_scale),
             pending_kinetics_evaluation: false,
             runtime_readbacks_enabled,
@@ -348,6 +348,17 @@ impl Simulation {
 
     pub fn new_buffers_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
         let scenario = create_buffers_scenario(config.width, config.height);
+        Self::from_scenario_with_shared_gpu_context(scenario, config, context)
+    }
+
+    /// Create the enzyme-catalyzed phosphorylation simulation.
+    pub fn new_enzyme(config: SimulationConfig) -> Result<Self> {
+        let scenario = create_enzyme_scenario(config.width, config.height);
+        Self::from_scenario(scenario, config)
+    }
+
+    pub fn new_enzyme_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+        let scenario = create_enzyme_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
 

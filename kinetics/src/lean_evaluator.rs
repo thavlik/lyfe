@@ -10,7 +10,7 @@ use crate::{
     KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate,
     engine::RuleEvaluator,
     lean_bridge::LeanBridge,
-    update::{ReactionDirective, ReactionId},
+    update::{MichaelisMentenKinetics, ReactionDirective, ReactionId, ReactionKineticsModel},
 };
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,17 @@ struct LeanSnapshot {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LeanKineticsModel {
+    MassAction,
+    MichaelisMenten,
+}
+
+fn default_lean_kinetics_model() -> LeanKineticsModel {
+    LeanKineticsModel::MassAction
+}
+
+#[derive(Deserialize)]
 struct LeanReactionRule {
     reaction_name: String,
     reactant_a: String,
@@ -52,6 +63,14 @@ struct LeanReactionRule {
     product_a: String,
     #[serde(default)]
     product_b: String,
+    #[serde(default)]
+    catalyst: Option<String>,
+    #[serde(default = "default_lean_kinetics_model")]
+    kinetic_model: LeanKineticsModel,
+    #[serde(default)]
+    km_reactant_a: Option<f64>,
+    #[serde(default)]
+    km_reactant_b: Option<f64>,
     rate_constant: f64,
     effective_rate: f64,
     #[serde(rename = "enthalpy_delta")]
@@ -144,14 +163,43 @@ impl LeanEvaluator {
     }
 
     /// Convert a Lean rule into a `ReactionDirective`.
-    fn to_directive(rule: LeanReactionRule, index: u32) -> ReactionDirective {
-        ReactionDirective {
+    fn to_directive(rule: LeanReactionRule, index: u32) -> Result<ReactionDirective, KineticsError> {
+        let (kinetics_model, michaelis_menten) = match rule.kinetic_model {
+            LeanKineticsModel::MassAction => (ReactionKineticsModel::MassAction, None),
+            LeanKineticsModel::MichaelisMenten => {
+                let km_reactant_a = rule.km_reactant_a.ok_or_else(|| {
+                    KineticsError::LeanError(format!(
+                        "Lean rule '{}' declared michaelis_menten kinetics without km_reactant_a",
+                        rule.reaction_name
+                    ))
+                })?;
+                if km_reactant_a <= 0.0 {
+                    return Err(KineticsError::LeanError(format!(
+                        "Lean rule '{}' declared non-positive km_reactant_a={}",
+                        rule.reaction_name,
+                        km_reactant_a
+                    )));
+                }
+                (
+                    ReactionKineticsModel::MichaelisMenten,
+                    Some(MichaelisMentenKinetics {
+                        km_reactant_a,
+                        km_reactant_b: rule.km_reactant_b,
+                    }),
+                )
+            }
+        };
+
+        Ok(ReactionDirective {
             reaction_id: ReactionId::new(index),
             reaction_name: rule.reaction_name,
             reactant_a: rule.reactant_a,
             reactant_b: rule.reactant_b,
             product_a: rule.product_a,
             product_b: rule.product_b,
+            catalyst: rule.catalyst,
+            kinetics_model,
+            michaelis_menten,
             applicable_tile_ids: rule.applicable_tile_ids,
             max_extent_per_second: f64::MAX,
             rate_constant: rule.rate_constant,
@@ -161,7 +209,7 @@ impl LeanEvaluator {
             entropy_delta_j_per_mol_k: Some(rule.entropy_delta),
             activation_energy_j_per_mol: Some(rule.activation_energy),
             is_reversible: rule.is_reversible,
-        }
+        })
     }
 }
 
@@ -209,7 +257,7 @@ impl RuleEvaluator for LeanEvaluator {
         for (i, rule) in result.rules.into_iter().enumerate() {
             update
                 .reaction_directives
-                .push(Self::to_directive(rule, i as u32));
+                .push(Self::to_directive(rule, i as u32)?);
         }
 
         if config.verbose {

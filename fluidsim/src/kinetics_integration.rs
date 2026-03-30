@@ -15,11 +15,10 @@
 //! 4. Apply the returned coefficients/directives
 //! 5. Continue simulation with updated parameters
 //!
-//! ## Fallback Behavior
+//! ## Failure Behavior
 //!
 //! The system tolerates:
 //! - No-op updates (kinetics returns empty update)
-//! - Unavailable rules (no Lean integration yet)
 //! - Evaluation errors (continue with prior parameters)
 
 use crate::gpu::GpuReactionRule;
@@ -27,7 +26,7 @@ use crate::semantic::{SemanticConfig, SemanticSnapshotBuilder};
 use crate::species::SpeciesRegistry;
 use crate::solid::MaterialRegistry;
 use kinetics::{
-    KineticsConfig, KineticsEngine, KineticsError,
+    KineticsConfig, KineticsEngine, KineticsError, ReactionKineticsModel,
     SemanticUpdate,
 };
 use anyhow::Result;
@@ -432,32 +431,60 @@ impl SemanticUpdateApplicator {
         let b_idx = lookup_optional_species(&directive.reactant_b);
         let product_a_idx = lookup_optional_species(&directive.product_a);
         let product_b_idx = lookup_optional_species(&directive.product_b);
+        let catalyst_idx = match directive.catalyst.as_deref() {
+            Some(name) => species_registry.index_of_name(name).map(|idx| Some(idx as u32)),
+            None => Some(None),
+        };
 
-        let (a_idx, b_idx, product_a_idx, product_b_idx) = match (
+        let (a_idx, b_idx, product_a_idx, product_b_idx, catalyst_idx) = match (
             a_idx,
             b_idx,
             product_a_idx,
             product_b_idx,
+            catalyst_idx,
         ) {
-            (Some(a), Some(b), Some(product_a), Some(product_b)) => {
-                (a as u32, b, product_a, product_b)
+            (Some(a), Some(b), Some(product_a), Some(product_b), Some(catalyst)) => {
+                (a as u32, b, product_a, product_b, catalyst)
             }
             _ => {
                 log::warn!(
-                    "Reaction '{}': species mapping failed for reactants/products ('{}', '{}') -> ('{}', '{}'), skipping",
+                    "Reaction '{}': species mapping failed for reactants/products/catalyst ('{}', '{}') -> ('{}', '{}') catalyst={:?}, skipping",
                     directive.reaction_name,
                     directive.reactant_a,
                     directive.reactant_b,
                     directive.product_a,
                     directive.product_b,
+                    directive.catalyst,
                 );
                 return None;
             }
         };
 
-        // Apply a fluidsim-side global scale so rule sources can stay close to
-        // lab-style values while the simulation controls visible pacing.
-        let rate = (directive.effective_rate as f32) * self.reaction_rate_scale;
+        let (kinetic_model, rate, km_reactant_a, km_reactant_b) = match directive.kinetics_model {
+            ReactionKineticsModel::MassAction => (
+                0u32,
+                (directive.effective_rate as f32) * self.reaction_rate_scale,
+                0.0,
+                0.0,
+            ),
+            ReactionKineticsModel::MichaelisMenten => {
+                let Some(mm) = directive.michaelis_menten.as_ref() else {
+                    log::warn!(
+                        "Reaction '{}': Michaelis-Menten kinetics requested without parameters, skipping",
+                        directive.reaction_name,
+                    );
+                    return None;
+                };
+                (
+                    1u32,
+                    (directive.rate_constant as f32)
+                        * (directive.effective_rate as f32)
+                        * self.reaction_rate_scale,
+                    mm.km_reactant_a as f32,
+                    mm.km_reactant_b.unwrap_or(0.0) as f32,
+                )
+            }
+        };
 
         let enthalpy = directive.enthalpy_delta_j_per_mol.unwrap_or(0.0) as f32;
         let entropy = directive.entropy_delta_j_per_mol_k.unwrap_or(0.0) as f32;
@@ -467,7 +494,11 @@ impl SemanticUpdateApplicator {
             b_idx,
             product_a_idx,
             product_b_idx,
+            catalyst_idx,
+            kinetic_model,
             rate,
+            km_reactant_a,
+            km_reactant_b,
             enthalpy,
             entropy,
         ))

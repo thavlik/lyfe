@@ -122,7 +122,11 @@ pub struct GpuReactionRule {
     pub reactant_b_index: u32,
     pub product_a_index: u32,
     pub product_b_index: u32,
-    pub effective_rate_bits: u32, // f32 bit-cast
+    pub catalyst_index: u32,
+    pub kinetic_model: u32,
+    pub effective_rate_bits: u32, // f32 bit-cast for mass action k or Michaelis-Menten kcat*scale
+    pub km_reactant_a_bits: u32, // f32 bit-cast, 0 for mass action
+    pub km_reactant_b_bits: u32, // f32 bit-cast, 0 when unused
     pub enthalpy_delta_bits: u32, // f32 bit-cast
     pub entropy_delta_bits: u32, // f32 bit-cast
 }
@@ -148,7 +152,11 @@ impl GpuReactionRule {
         b: Option<u32>,
         product_a: Option<u32>,
         product_b: Option<u32>,
+        catalyst: Option<u32>,
+        kinetic_model: u32,
         rate: f32,
+        km_reactant_a: f32,
+        km_reactant_b: f32,
         enthalpy: f32,
         entropy: f32,
     ) -> Self {
@@ -157,7 +165,11 @@ impl GpuReactionRule {
             reactant_b_index: b.unwrap_or(Self::NONE),
             product_a_index: product_a.unwrap_or(Self::NONE),
             product_b_index: product_b.unwrap_or(Self::NONE),
+            catalyst_index: catalyst.unwrap_or(Self::NONE),
+            kinetic_model,
             effective_rate_bits: rate.to_bits(),
+            km_reactant_a_bits: km_reactant_a.to_bits(),
+            km_reactant_b_bits: km_reactant_b.to_bits(),
             enthalpy_delta_bits: enthalpy.to_bits(),
             entropy_delta_bits: entropy.to_bits(),
         }
@@ -2407,7 +2419,11 @@ impl GpuSimulation {
             r.reactant_b_index.hash(&mut hasher);
             r.product_a_index.hash(&mut hasher);
             r.product_b_index.hash(&mut hasher);
+            r.catalyst_index.hash(&mut hasher);
+            r.kinetic_model.hash(&mut hasher);
             r.effective_rate_bits.hash(&mut hasher);
+            r.km_reactant_a_bits.hash(&mut hasher);
+            r.km_reactant_b_bits.hash(&mut hasher);
             r.enthalpy_delta_bits.hash(&mut hasher);
             r.entropy_delta_bits.hash(&mut hasher);
         }

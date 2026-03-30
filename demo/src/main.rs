@@ -149,6 +149,7 @@ enum ScenarioKind {
     Basic,
     AcidBase,
     Buffers,
+    Enzyme,
     Leak,
 }
 
@@ -171,6 +172,8 @@ enum Commands {
     AcidBase,
     /// Weak-acid buffer vs NaOH with acetic-acid equilibrium
     Buffers,
+    /// Enzyme-catalyzed phosphorylation: Glucose + ATP -> G6P + ADP
+    Enzyme,
     /// Buffer scenario with membrane leak channels for K+ and Na+
     Leak,
 }
@@ -342,6 +345,7 @@ impl DemoApp {
             ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, context)?,
             ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, context)?,
             ScenarioKind::Buffers => Simulation::new_buffers_with_shared_gpu_context(config, context)?,
+            ScenarioKind::Enzyme => Simulation::new_enzyme_with_shared_gpu_context(config, context)?,
             ScenarioKind::Leak => Simulation::new_leak_with_shared_gpu_context(config, context)?,
         };
         simulation.set_async_inspection_interval(TOOLTIP_REFRESH_INTERVAL);
@@ -1823,6 +1827,7 @@ fn main() -> Result<()> {
     let scenario = match cli.command {
         Some(Commands::AcidBase) => ScenarioKind::AcidBase,
         Some(Commands::Buffers) => ScenarioKind::Buffers,
+        Some(Commands::Enzyme) => ScenarioKind::Enzyme,
         Some(Commands::Leak) => ScenarioKind::Leak,
         Some(Commands::Basic) | None => ScenarioKind::Basic,
     };

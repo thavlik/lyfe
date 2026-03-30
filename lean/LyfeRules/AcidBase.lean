@@ -114,8 +114,12 @@ def makeRule (
   reactantB := reactantB
   productA := productA
   productB := productB
+  catalyst := none
+  kineticModel := "mass_action"
   rateConstant := rateConstant
   effectiveRate := effectiveRate
+  kmReactantA := none
+  kmReactantB := none
   enthalpyDelta := enthalpyDelta
   gibbsFreeEnergy := gibbsFreeEnergy
   entropyDelta := entropyDelta

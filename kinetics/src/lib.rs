@@ -16,7 +16,8 @@
 //! - Lean is used for semantic reasoning, NOT per-cell-per-frame computation
 //! - The snapshot is a reduced/aggregated view, NOT the entire fine grid
 //! - The update is compact coefficients/directives, NOT a replacement state
-//! - No-op operation is first-class; the system tolerates unavailable rules
+//! - Lean is the single source of truth for semantic rules
+//! - No-op operation is first-class only when rule evaluation is explicitly disabled
 //!
 //! ## Modules
 //!
@@ -36,7 +37,6 @@ pub mod noop;
 pub mod lean_bridge;
 pub mod lean_evaluator;
 pub mod diagnostics;
-pub mod acid_base;
 
 // Re-export primary types for ergonomic use
 pub use snapshot::{
@@ -44,13 +44,13 @@ pub use snapshot::{
     BoundarySummary, BoundaryFlags, SpeciesTableSnapshot, MaterialsTableSnapshot,
 };
 pub use update::{
-    SemanticUpdate, TileUpdate, BoundaryUpdate, ReactionDirective,
-    SpeciesScalar, MiscibilityOverride, BoundaryTransportMode, ReactionSetId, ReactionId,
+    BoundaryTransportMode, BoundaryUpdate, MichaelisMentenKinetics,
+    MiscibilityOverride, ReactionDirective, ReactionId, ReactionKineticsModel,
+    ReactionSetId, SemanticUpdate, SpeciesScalar, TileUpdate,
 };
 pub use config::KineticsConfig;
 pub use engine::KineticsEngine;
 pub use diagnostics::KineticsDiagnostic;
-pub use acid_base::AcidBaseEvaluator;
 
 use thiserror::Error;
 

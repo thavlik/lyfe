@@ -64,10 +64,19 @@ structure ReactionRule where
   reactantB           : String
   productA            : String
   productB            : String
-  /-- Physical rate constant (L·mol⁻¹·s⁻¹) — for reference / Arrhenius. -/
+  catalyst            : Option String
+  /-- The kinetic model used by the runtime. -/
+  kineticModel        : String
+  /-- Physical kinetic constant.
+      Mass action: $k$.
+      Michaelis-Menten: $k_{cat}$. -/
   rateConstant        : Float
   /-- Effective rate for GPU simulation, pre-scaled for visual stability. -/
   effectiveRate       : Float
+  /-- Michaelis constant for reactant A in mol/L when using Michaelis-Menten. -/
+  kmReactantA         : Option Float
+  /-- Michaelis constant for reactant B in mol/L when using Michaelis-Menten. -/
+  kmReactantB         : Option Float
   /-- ΔH° in J/mol.  Negative ⟹ exothermic ⟹ heats the fluid. -/
   enthalpyDelta       : Float
   /-- ΔG° in J/mol.  Negative ⟹ spontaneous. -/
@@ -87,8 +96,12 @@ instance : ToJson ReactionRule where
     ("reactant_b",                   ToJson.toJson r.reactantB),
     ("product_a",                    ToJson.toJson r.productA),
     ("product_b",                    ToJson.toJson r.productB),
+    ("catalyst",                     ToJson.toJson r.catalyst),
+    ("kinetic_model",                ToJson.toJson r.kineticModel),
     ("rate_constant",                ToJson.toJson r.rateConstant),
     ("effective_rate",               ToJson.toJson r.effectiveRate),
+    ("km_reactant_a",                ToJson.toJson r.kmReactantA),
+    ("km_reactant_b",                ToJson.toJson r.kmReactantB),
     ("enthalpy_delta",               ToJson.toJson r.enthalpyDelta),
     ("gibbs_free_energy",            ToJson.toJson r.gibbsFreeEnergy),
     ("entropy_delta",                ToJson.toJson r.entropyDelta),

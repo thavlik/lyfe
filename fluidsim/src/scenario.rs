@@ -395,6 +395,79 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
     builder.build()
 }
 
+/// Create an enzyme-catalyzed phosphorylation scenario.
+///
+/// Uses the same hollow-box geometry as the basic demo, but fills the entire
+/// interior with glucose, ATP, and a low concentration of hexokinase.
+pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
+    let wall_thickness = 4u32;
+    let inner_size = (width.min(height) / 2).max(64);
+    let outer_size = inner_size + 2 * wall_thickness;
+
+    let center_x = width / 2;
+    let center_y = height / 2;
+
+    let outer_x0 = center_x - outer_size / 2;
+    let outer_y0 = center_y - outer_size / 2;
+    let outer_x1 = outer_x0 + outer_size;
+    let outer_y1 = outer_y0 + outer_size;
+
+    let inner_x0 = outer_x0 + wall_thickness;
+    let inner_y0 = outer_y0 + wall_thickness;
+    let inner_x1 = outer_x1 - wall_thickness;
+    let inner_y1 = outer_y1 - wall_thickness;
+
+    let builder = ScenarioBuilder::new(width, height)
+        .register_species("Glucose")
+        .register_species("ATP")
+        .register_species("ADP")
+        .register_species("G6P")
+        .register_species("Hexokinase");
+
+    let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
+
+    let builder = builder.fill_hollow_rect(
+        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+    );
+
+    let mut builder = builder.fill_temperature(280.0);
+
+    let glucose_id = builder.species_registry.id_of("Glucose").unwrap();
+    let atp_id = builder.species_registry.id_of("ATP").unwrap();
+    let hexokinase_id = builder.species_registry.id_of("Hexokinase").unwrap();
+
+    let inner_width = (inner_x1 - inner_x0) as f32;
+    let inner_height = (inner_y1 - inner_y0) as f32;
+
+    for y in inner_y0..inner_y1 {
+        for x in inner_x0..inner_x1 {
+            let index = builder.grid.index_of(CellCoord::new(x, y));
+            if builder.solid_geometry.is_solid(index) {
+                continue;
+            }
+
+            builder.initial_concentrations
+                .entry(index)
+                .or_default()
+                .set(glucose_id, 1.0);
+            builder.initial_concentrations
+                .entry(index)
+                .or_default()
+                .set(atp_id, 1.0);
+            builder.initial_concentrations
+                .entry(index)
+                .or_default()
+                .set(hexokinase_id, 0.01);
+
+            let nx = (x - inner_x0) as f32 / inner_width;
+            let ny = (y - inner_y0) as f32 / inner_height;
+            builder.initial_temperatures[index] = if nx + ny < 1.0 { 318.15 } else { 288.0 };
+        }
+    }
+
+    builder.build()
+}
+
 /// Create a weak-acid buffer scenario.
 ///
 /// Top-left region: 0.35 M sodium acetate + 0.35 M acetic acid.

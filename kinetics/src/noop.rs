@@ -1,9 +1,8 @@
-//! No-op evaluator for fallback/testing.
+//! No-op evaluator for explicitly disabled rules and testing.
 //!
 //! This evaluator returns no-op updates for all snapshots.
 //! It is used when:
-//! - Lean rules are not yet implemented
-//! - Lean bridge fails to initialize
+//! - Semantic rule evaluation is explicitly disabled
 //! - Testing/debugging the integration
 
 use crate::{

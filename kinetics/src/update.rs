@@ -51,6 +51,23 @@ impl ReactionSetId {
     }
 }
 
+/// Runtime kinetic model for a reaction directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReactionKineticsModel {
+    #[default]
+    MassAction,
+    MichaelisMenten,
+}
+
+/// Michaelis-Menten parameters for enzyme-gated reactions.
+#[derive(Debug, Clone)]
+pub struct MichaelisMentenKinetics {
+    /// Michaelis constant for reactant A in mol/L.
+    pub km_reactant_a: f64,
+    /// Optional Michaelis constant for reactant B in mol/L.
+    pub km_reactant_b: Option<f64>,
+}
+
 /// How transport should behave at a boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BoundaryTransportMode {
@@ -212,13 +229,21 @@ pub struct ReactionDirective {
     pub product_a: String,
     /// Product B species name (empty when the reaction has no second product)
     pub product_b: String,
+    /// Optional catalyst/enzyme that must be present but is not consumed.
+    pub catalyst: Option<String>,
+    /// The kinetic model used to interpret the rate fields.
+    pub kinetics_model: ReactionKineticsModel,
+    /// Optional Michaelis-Menten parameters supplied by Lean.
+    pub michaelis_menten: Option<MichaelisMentenKinetics>,
     /// Tiles where this reaction should be applied
     pub applicable_tile_ids: Vec<u32>,
     /// Maximum extent per second (limits reaction rate)
     pub max_extent_per_second: f64,
-    /// Physical rate constant (L·mol⁻¹·s⁻¹)
+    /// Primary physical kinetic constant.
+    /// Mass action: $k$.
+    /// Michaelis-Menten: $k_{cat}$.
     pub rate_constant: f64,
-    /// Effective rate for GPU simulation (pre-scaled for stability)
+    /// Lean-defined runtime scaling factor applied before fluidsim's global rate scale.
     pub effective_rate: f64,
     /// Enthalpy change ΔH (J/mol, negative = exothermic → heats up)
     pub enthalpy_delta_j_per_mol: Option<f64>,
@@ -242,6 +267,9 @@ impl ReactionDirective {
             reactant_b: String::new(),
             product_a: String::new(),
             product_b: String::new(),
+            catalyst: None,
+            kinetics_model: ReactionKineticsModel::MassAction,
+            michaelis_menten: None,
             applicable_tile_ids: Vec::new(),
             max_extent_per_second: f64::MAX,
             rate_constant: 1.0,

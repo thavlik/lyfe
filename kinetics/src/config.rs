@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// Configuration for the kinetics engine.
 #[derive(Debug, Clone)]
 pub struct KineticsConfig {
-    /// Enable Lean-backed rules (if false, uses Rust-only fallbacks)
+    /// Enable Lean-backed rules. Required whenever any semantic rules are enabled.
     pub enable_lean: bool,
     
     /// Path to Lean library/rules (if compiled separately)
@@ -138,6 +138,12 @@ impl KineticsConfig {
     
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), String> {
+        let any_rules_enabled = self.enable_diffusion_rules
+            || self.enable_reaction_rules
+            || self.enable_thermal_rules
+            || self.enable_miscibility_rules
+            || self.enable_boundary_rules;
+
         if self.evaluation_timeout_seconds <= 0.0 {
             return Err("Evaluation timeout must be positive".to_string());
         }
@@ -146,6 +152,9 @@ impl KineticsConfig {
         }
         if self.conservation_tolerance <= 0.0 {
             return Err("Conservation tolerance must be positive".to_string());
+        }
+        if any_rules_enabled && !self.enable_lean {
+            return Err("Lean-backed rules are required when semantic rule evaluation is enabled".to_string());
         }
         if self.enable_lean && self.lean_library_path.is_some() {
             let path = self.lean_library_path.as_ref().unwrap();

@@ -11,4 +11,5 @@
 
 import LyfeRules.Types
 import LyfeRules.AcidBase
+import LyfeRules.Enzyme
 import LyfeRules.Eval

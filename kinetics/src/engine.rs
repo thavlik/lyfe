@@ -4,7 +4,7 @@
 //! It receives `SemanticSnapshot` inputs and produces `SemanticUpdate` outputs.
 
 use crate::{
-    KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate, acid_base::AcidBaseEvaluator,
+    KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate,
     diagnostics::KineticsDiagnostic, lean_evaluator::LeanEvaluator, noop::NoopEvaluator,
 };
 
@@ -66,30 +66,20 @@ impl KineticsEngine {
         config.validate().map_err(KineticsError::ConfigError)?;
         let initial_last_evaluation_time = -config.min_evaluation_interval;
 
-        // Select the evaluator: Lean first, then Rust fallback, then noop
-        let evaluator: Box<dyn RuleEvaluator> = if config.enable_lean {
-            match LeanEvaluator::discover() {
-                Ok(lean_eval) => {
-                    log::info!(
-                        "Kinetics engine using Lean rules ({})",
-                        lean_eval.bridge().binary_path().display()
-                    );
-                    Box::new(lean_eval)
-                }
-                Err(e) => {
-                    log::warn!("Lean binary not found: {}", e);
-                    if config.enable_reaction_rules {
-                        log::info!("Falling back to Rust acid-base evaluator");
-                        Box::new(AcidBaseEvaluator::new())
-                    } else {
-                        log::info!("Kinetics engine using no-op evaluator");
-                        Box::new(NoopEvaluator::new())
-                    }
-                }
-            }
-        } else if config.enable_reaction_rules {
-            log::info!("Kinetics engine using acid-base evaluator");
-            Box::new(AcidBaseEvaluator::new())
+        let any_rules_enabled = config.enable_diffusion_rules
+            || config.enable_reaction_rules
+            || config.enable_thermal_rules
+            || config.enable_miscibility_rules
+            || config.enable_boundary_rules;
+
+        // Lean is the single source of truth for active semantic rules.
+        let evaluator: Box<dyn RuleEvaluator> = if any_rules_enabled {
+            let lean_eval = LeanEvaluator::discover()?;
+            log::info!(
+                "Kinetics engine using Lean rules ({})",
+                lean_eval.bridge().binary_path().display()
+            );
+            Box::new(lean_eval)
         } else {
             log::info!("Kinetics engine using no-op evaluator");
             Box::new(NoopEvaluator::new())
