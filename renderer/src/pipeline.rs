@@ -102,6 +102,13 @@ impl RenderBuffer {
         mapped[byte_offset..end].copy_from_slice(bytes);
         Ok(())
     }
+
+    fn destroy(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+        unsafe {
+            device.destroy_buffer(self.buffer, None);
+        }
+        allocator.free(std::mem::take(&mut self.allocation)).ok();
+    }
 }
 
 /// Rendering pipeline for visualizing fluid simulation.
@@ -543,7 +550,7 @@ impl RenderPipeline {
 
         // Debug: Log a sample concentration to verify data is changing
         let center_idx = self.cell_count / 2 + self.grid_width as usize / 2;
-        if self.frame_counter % 30 == 0 {
+        if self.frame_counter.is_multiple_of(30) {
             log::debug!(
                 "Upload frame {}: center concentrations = [{:.4}, {:.4}, {:.4}]",
                 self.frame_counter,
@@ -699,44 +706,15 @@ impl RenderPipeline {
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             ctx.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-
-            let mut alloc = ctx.allocator.as_ref().unwrap().lock();
-
-            ctx.device
-                .destroy_buffer(self.concentration_buffer.buffer, None);
-            alloc
-                .free(std::mem::take(&mut self.concentration_buffer.allocation))
-                .ok();
-
-            ctx.device
-                .destroy_buffer(self.solid_mask_buffer.buffer, None);
-            alloc
-                .free(std::mem::take(&mut self.solid_mask_buffer.allocation))
-                .ok();
-
-            ctx.device
-                .destroy_buffer(self.material_id_buffer.buffer, None);
-            alloc
-                .free(std::mem::take(&mut self.material_id_buffer.allocation))
-                .ok();
-
-            ctx.device
-                .destroy_buffer(self.species_color_buffer.buffer, None);
-            alloc
-                .free(std::mem::take(&mut self.species_color_buffer.allocation))
-                .ok();
-
-            ctx.device
-                .destroy_buffer(self.temperature_buffer.buffer, None);
-            alloc
-                .free(std::mem::take(&mut self.temperature_buffer.allocation))
-                .ok();
-
-            ctx.device.destroy_buffer(self.staging_buffer.buffer, None);
-            alloc
-                .free(std::mem::take(&mut self.staging_buffer.allocation))
-                .ok();
         }
+
+        let mut alloc = ctx.allocator.as_ref().unwrap().lock();
+        self.concentration_buffer.destroy(&ctx.device, &mut alloc);
+        self.solid_mask_buffer.destroy(&ctx.device, &mut alloc);
+        self.material_id_buffer.destroy(&ctx.device, &mut alloc);
+        self.species_color_buffer.destroy(&ctx.device, &mut alloc);
+        self.temperature_buffer.destroy(&ctx.device, &mut alloc);
+        self.staging_buffer.destroy(&ctx.device, &mut alloc);
     }
 }
 

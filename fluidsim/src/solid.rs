@@ -148,6 +148,14 @@ pub struct SolidGeometry {
     pub cell_metadata: AHashMap<usize, SolidCellMeta>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SolidRect {
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
 impl SolidGeometry {
     /// Create empty solid geometry for a grid.
     pub fn new(cell_count: usize) -> Self {
@@ -213,33 +221,44 @@ impl SolidGeometry {
     /// Create a hollow rectangle (outline only).
     pub fn fill_hollow_rect(
         &mut self,
-        x0: u32,
-        y0: u32,
-        x1: u32,
-        y1: u32,
+        rect: SolidRect,
         thickness: u32,
         width: u32,
         material: MaterialId,
     ) {
         // Top edge
-        self.fill_rect(x0, y0, x1, y0 + thickness, width, material);
+        self.fill_rect(
+            rect.x0,
+            rect.y0,
+            rect.x1,
+            rect.y0 + thickness,
+            width,
+            material,
+        );
         // Bottom edge
-        self.fill_rect(x0, y1 - thickness, x1, y1, width, material);
+        self.fill_rect(
+            rect.x0,
+            rect.y1 - thickness,
+            rect.x1,
+            rect.y1,
+            width,
+            material,
+        );
         // Left edge
         self.fill_rect(
-            x0,
-            y0 + thickness,
-            x0 + thickness,
-            y1 - thickness,
+            rect.x0,
+            rect.y0 + thickness,
+            rect.x0 + thickness,
+            rect.y1 - thickness,
             width,
             material,
         );
         // Right edge
         self.fill_rect(
-            x1 - thickness,
-            y0 + thickness,
-            x1,
-            y1 - thickness,
+            rect.x1 - thickness,
+            rect.y0 + thickness,
+            rect.x1,
+            rect.y1 - thickness,
             width,
             material,
         );

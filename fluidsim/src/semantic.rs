@@ -27,6 +27,30 @@ use kinetics::{
     SpeciesId as KineticsSpeciesId, SpeciesTableSnapshot, TileFlags,
 };
 
+pub struct SemanticSnapshotInput<'a> {
+    pub fine_width: u32,
+    pub fine_height: u32,
+    pub sim_time: f64,
+    pub dt_window: f64,
+    pub concentrations: &'a [Vec<f32>],
+    pub solid_mask: &'a [u32],
+    pub material_ids: &'a [u32],
+    pub temperatures: &'a [f32],
+    pub species_registry: &'a SpeciesRegistry,
+    pub material_registry: &'a MaterialRegistry,
+}
+
+struct TileAggregationInput<'a> {
+    fine_width: u32,
+    fine_height: u32,
+    tile_size: u32,
+    concentrations: &'a [Vec<f32>],
+    solid_mask: &'a [u32],
+    material_ids: &'a [u32],
+    temperatures: &'a [f32],
+    species_registry: &'a SpeciesRegistry,
+}
+
 /// Configuration for semantic snapshot generation.
 #[derive(Debug, Clone)]
 pub struct SemanticConfig {
@@ -83,64 +107,55 @@ impl SemanticSnapshotBuilder {
     /// * `temperatures` - Temperature per cell in Kelvin
     /// * `species_registry` - Species registry
     /// * `material_registry` - Material registry
-    pub fn build(
-        &self,
-        fine_width: u32,
-        fine_height: u32,
-        sim_time: f64,
-        dt_window: f64,
-        concentrations: &[Vec<f32>],
-        solid_mask: &[u32],
-        material_ids: &[u32],
-        temperatures: &[f32],
-        species_registry: &SpeciesRegistry,
-        material_registry: &MaterialRegistry,
-    ) -> SemanticSnapshot {
+    pub fn build(&self, input: SemanticSnapshotInput<'_>) -> SemanticSnapshot {
         let tile_size = self.config.tile_size;
-        let coarse_width = (fine_width + tile_size - 1) / tile_size;
-        let coarse_height = (fine_height + tile_size - 1) / tile_size;
+        let coarse_width = input.fine_width.div_ceil(tile_size);
+        let coarse_height = input.fine_height.div_ceil(tile_size);
 
         let mut snapshot = SemanticSnapshot::new(
             coarse_width,
             coarse_height,
             tile_size,
-            fine_width,
-            fine_height,
+            input.fine_width,
+            input.fine_height,
         );
 
-        snapshot.sim_time_seconds = sim_time;
-        snapshot.dt_window_seconds = dt_window;
+        snapshot.sim_time_seconds = input.sim_time;
+        snapshot.dt_window_seconds = input.dt_window;
 
         // Build species table
-        snapshot.species_table = self.build_species_table(species_registry);
+        snapshot.species_table = self.build_species_table(input.species_registry);
 
         // Build materials table
-        snapshot.materials_table = self.build_materials_table(material_registry);
+        snapshot.materials_table = self.build_materials_table(input.material_registry);
+
+        let tile_input = TileAggregationInput {
+            fine_width: input.fine_width,
+            fine_height: input.fine_height,
+            tile_size,
+            concentrations: input.concentrations,
+            solid_mask: input.solid_mask,
+            material_ids: input.material_ids,
+            temperatures: input.temperatures,
+            species_registry: input.species_registry,
+        };
 
         // Aggregate tiles
         for tile_y in 0..coarse_height {
             for tile_x in 0..coarse_width {
                 let tile_id = tile_y * coarse_width + tile_x;
-                let tile = self.aggregate_tile(
-                    tile_id,
-                    tile_x,
-                    tile_y,
-                    fine_width,
-                    fine_height,
-                    tile_size,
-                    concentrations,
-                    solid_mask,
-                    material_ids,
-                    temperatures,
-                    species_registry,
-                    material_registry,
-                );
+                let tile = self.aggregate_tile(tile_id, tile_x, tile_y, &tile_input);
                 snapshot.tiles[tile_id as usize] = tile;
             }
         }
 
         // Compute global statistics
-        self.compute_global_stats(&mut snapshot, concentrations, temperatures, solid_mask);
+        self.compute_global_stats(
+            &mut snapshot,
+            input.concentrations,
+            input.temperatures,
+            input.solid_mask,
+        );
 
         // Compute boundaries if enabled
         if self.config.compute_boundaries {
@@ -193,23 +208,15 @@ impl SemanticSnapshotBuilder {
         tile_id: u32,
         tile_x: u32,
         tile_y: u32,
-        fine_width: u32,
-        fine_height: u32,
-        tile_size: u32,
-        concentrations: &[Vec<f32>],
-        solid_mask: &[u32],
-        material_ids: &[u32],
-        temperatures: &[f32],
-        species_registry: &SpeciesRegistry,
-        _material_registry: &MaterialRegistry,
+        input: &TileAggregationInput<'_>,
     ) -> SemanticTile {
         let mut tile = SemanticTile::new(tile_id, tile_x, tile_y);
 
         // Calculate tile bounds
-        let start_x = tile_x * tile_size;
-        let start_y = tile_y * tile_size;
-        let end_x = (start_x + tile_size).min(fine_width);
-        let end_y = (start_y + tile_size).min(fine_height);
+        let start_x = tile_x * input.tile_size;
+        let start_y = tile_y * input.tile_size;
+        let end_x = (start_x + input.tile_size).min(input.fine_width);
+        let end_y = (start_y + input.tile_size).min(input.fine_height);
 
         // Accumulators
         let mut fluid_count = 0u32;
@@ -219,7 +226,7 @@ impl SemanticSnapshotBuilder {
         let mut temp_max = f64::MIN;
         let mut temp_sq_sum = 0.0f64;
 
-        let species_count = concentrations.len();
+        let species_count = input.concentrations.len();
         let mut species_sums: Vec<f64> = vec![0.0; species_count];
         let mut species_maxes: Vec<f32> = vec![0.0; species_count];
         let mut species_mins: Vec<f32> = vec![f32::MAX; species_count];
@@ -232,28 +239,28 @@ impl SemanticSnapshotBuilder {
         // Aggregate over fine cells
         for fy in start_y..end_y {
             for fx in start_x..end_x {
-                let cell_idx = (fy * fine_width + fx) as usize;
+                let cell_idx = (fy * input.fine_width + fx) as usize;
 
                 // Solid/fluid
-                let is_solid = solid_mask[cell_idx] != 0;
+                let is_solid = input.solid_mask[cell_idx] != 0;
                 if is_solid {
                     solid_count += 1;
 
                     // Track material
-                    let mat_id = material_ids[cell_idx];
+                    let mat_id = input.material_ids[cell_idx];
                     *material_counts.entry(mat_id).or_insert(0) += 1;
                 } else {
                     fluid_count += 1;
 
                     // Temperature (only for fluid cells)
-                    let temp = temperatures[cell_idx] as f64;
+                    let temp = input.temperatures[cell_idx] as f64;
                     temp_sum += temp;
                     temp_min = temp_min.min(temp);
                     temp_max = temp_max.max(temp);
                     temp_sq_sum += temp * temp;
 
                     // Concentrations (only for fluid cells)
-                    for (s, species_conc) in concentrations.iter().enumerate() {
+                    for (s, species_conc) in input.concentrations.iter().enumerate() {
                         let conc = species_conc[cell_idx];
                         species_sums[s] += conc as f64;
                         species_maxes[s] = species_maxes[s].max(conc);
@@ -287,7 +294,7 @@ impl SemanticSnapshotBuilder {
         }
 
         // Species concentrations
-        for (s, info) in species_registry.iter().enumerate() {
+        for (s, info) in input.species_registry.iter().enumerate() {
             if fluid_count > 0 {
                 let mean = (species_sums[s] / fluid_count as f64) as f64;
                 let species_id = KineticsSpeciesId(info.id.0);
@@ -329,8 +336,8 @@ impl SemanticSnapshotBuilder {
         }
         if tile_x == 0
             || tile_y == 0
-            || tile_x >= (fine_width / tile_size) - 1
-            || tile_y >= (fine_height / tile_size) - 1
+            || tile_x >= (input.fine_width / input.tile_size) - 1
+            || tile_y >= (input.fine_height / input.tile_size) - 1
         {
             flags |= TileFlags::IS_BOUNDARY;
         }
@@ -411,22 +418,22 @@ impl SemanticSnapshotBuilder {
             // Check right neighbor
             if x + 1 < snapshot.coarse_width {
                 let neighbor_id = y * snapshot.coarse_width + (x + 1);
-                if let Some(neighbor) = snapshot.tiles.get(neighbor_id as usize) {
-                    if let Some(boundary) = self.create_boundary(boundary_id, tile, neighbor) {
-                        boundaries.push(boundary);
-                        boundary_id += 1;
-                    }
+                if let Some(neighbor) = snapshot.tiles.get(neighbor_id as usize)
+                    && let Some(boundary) = self.create_boundary(boundary_id, tile, neighbor)
+                {
+                    boundaries.push(boundary);
+                    boundary_id += 1;
                 }
             }
 
             // Check bottom neighbor
             if y + 1 < snapshot.coarse_height {
                 let neighbor_id = (y + 1) * snapshot.coarse_width + x;
-                if let Some(neighbor) = snapshot.tiles.get(neighbor_id as usize) {
-                    if let Some(boundary) = self.create_boundary(boundary_id, tile, neighbor) {
-                        boundaries.push(boundary);
-                        boundary_id += 1;
-                    }
+                if let Some(neighbor) = snapshot.tiles.get(neighbor_id as usize)
+                    && let Some(boundary) = self.create_boundary(boundary_id, tile, neighbor)
+                {
+                    boundaries.push(boundary);
+                    boundary_id += 1;
                 }
             }
         }

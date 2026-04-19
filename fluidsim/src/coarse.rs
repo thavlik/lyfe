@@ -58,6 +58,44 @@ enum ReadbackState {
     },
 }
 
+pub struct CoarseGridCreateInfo {
+    pub device: ash::Device,
+    pub queue: vk::Queue,
+    pub queue_family: u32,
+    pub allocator: Arc<Mutex<Allocator>>,
+    pub full_width: u32,
+    pub full_height: u32,
+    pub species_count: usize,
+    pub mip_factor: u32,
+    pub source_buffers: CoarseGridSourceBuffers,
+}
+
+pub struct CoarseGridSourceBuffers {
+    pub src_buffer_a: vk::Buffer,
+    pub src_buffer_b: vk::Buffer,
+    pub temperature_buffer_a: vk::Buffer,
+    pub temperature_buffer_b: vk::Buffer,
+    pub solid_mask_buffer: vk::Buffer,
+    pub conc_buffer_size: u64,
+    pub temperature_buffer_size: u64,
+    pub mask_buffer_size: u64,
+}
+
+struct CoarseDescriptorSetWrite {
+    full_conc_buffer: vk::Buffer,
+    full_temperature_buffer: vk::Buffer,
+    solid_mask_buffer: vk::Buffer,
+    coarse_conc_buffer: vk::Buffer,
+    coarse_count_buffer: vk::Buffer,
+    coarse_temperature_buffer: vk::Buffer,
+    full_conc_size: u64,
+    full_temperature_size: u64,
+    mask_size: u64,
+    coarse_conc_size: u64,
+    coarse_count_size: u64,
+    coarse_temperature_size: u64,
+}
+
 /// Coarse grid computation and async readback system.
 pub struct CoarseGrid {
     // Vulkan handles (borrowed from GpuSimulation)
@@ -171,26 +209,21 @@ pub struct CoarseCellData {
 
 impl CoarseGrid {
     /// Create a new coarse grid system.
-    pub fn new(
-        device: ash::Device,
-        queue: vk::Queue,
-        queue_family: u32,
-        allocator: Arc<Mutex<Allocator>>,
-        full_width: u32,
-        full_height: u32,
-        species_count: usize,
-        mip_factor: u32,
-        src_buffer_a: vk::Buffer,
-        src_buffer_b: vk::Buffer,
-        temperature_buffer_a: vk::Buffer,
-        temperature_buffer_b: vk::Buffer,
-        solid_mask_buffer: vk::Buffer,
-        conc_buffer_size: u64,
-        temperature_buffer_size: u64,
-        mask_buffer_size: u64,
-    ) -> Result<Self> {
-        let coarse_width = (full_width + mip_factor - 1) / mip_factor;
-        let coarse_height = (full_height + mip_factor - 1) / mip_factor;
+    pub fn new(info: CoarseGridCreateInfo) -> Result<Self> {
+        let CoarseGridCreateInfo {
+            device,
+            queue,
+            queue_family,
+            allocator,
+            full_width,
+            full_height,
+            species_count,
+            mip_factor,
+            source_buffers,
+        } = info;
+
+        let coarse_width = full_width.div_ceil(mip_factor);
+        let coarse_height = full_height.div_ceil(mip_factor);
         let coarse_cell_count = (coarse_width * coarse_height) as usize;
 
         log::info!(
@@ -242,7 +275,7 @@ impl CoarseGrid {
         let cell_readback_buffer = CoarseBuffer::new(
             &device,
             &mut alloc,
-            cell_readback_size.max(256), // Minimum size for alignment
+            cell_readback_size.max(256),
             vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::CpuToGpu,
             "cell_readback",
@@ -250,7 +283,6 @@ impl CoarseGrid {
 
         drop(alloc);
 
-        // Compile coarse grid shader
         let shader_source = include_str!("../shaders/coarse_grid.comp");
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
         let mut options =
@@ -274,39 +306,32 @@ impl CoarseGrid {
         let shader_module_info = vk::ShaderModuleCreateInfo::default().code(spirv.as_binary());
         let shader_module = unsafe { device.create_shader_module(&shader_module_info, None)? };
 
-        // Create descriptor set layout for coarse shader
         let bindings = [
-            // Binding 0: Full concentrations (read)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 1: Solid mask (read)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 2: Full temperatures (read)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 3: Coarse concentrations (write)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 4: Coarse fluid counts (write)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 5: Coarse temperatures (write)
             vk::DescriptorSetLayoutBinding::default()
                 .binding(5)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -318,7 +343,6 @@ impl CoarseGrid {
         let coarse_descriptor_set_layout =
             unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
 
-        // Create pipeline layout
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
@@ -330,7 +354,6 @@ impl CoarseGrid {
         let coarse_pipeline_layout =
             unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
-        // Create compute pipeline
         let entry_name = c"main";
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -349,13 +372,9 @@ impl CoarseGrid {
 
         unsafe { device.destroy_shader_module(shader_module, None) };
 
-        // Create descriptor pool and sets
-        let pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(24), // 6 bindings * 4 sets
-        ];
-
+        let pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(24)];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(4)
             .pool_sizes(&pool_sizes);
@@ -372,73 +391,80 @@ impl CoarseGrid {
             .set_layouts(&layouts);
         let coarse_descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info)? };
 
-        // Update descriptor sets for concentration current buffer x temperature current buffer.
         Self::update_coarse_descriptor_set(
             &device,
             coarse_descriptor_sets[0],
-            src_buffer_a,
-            temperature_buffer_a,
-            solid_mask_buffer,
-            coarse_conc_buffer.buffer,
-            coarse_fluid_count_buffer.buffer,
-            coarse_temperature_buffer.buffer,
-            conc_buffer_size,
-            temperature_buffer_size,
-            mask_buffer_size,
-            coarse_conc_size,
-            coarse_count_size,
-            coarse_temperature_size,
+            CoarseDescriptorSetWrite {
+                full_conc_buffer: source_buffers.src_buffer_a,
+                full_temperature_buffer: source_buffers.temperature_buffer_a,
+                solid_mask_buffer: source_buffers.solid_mask_buffer,
+                coarse_conc_buffer: coarse_conc_buffer.buffer,
+                coarse_count_buffer: coarse_fluid_count_buffer.buffer,
+                coarse_temperature_buffer: coarse_temperature_buffer.buffer,
+                full_conc_size: source_buffers.conc_buffer_size,
+                full_temperature_size: source_buffers.temperature_buffer_size,
+                mask_size: source_buffers.mask_buffer_size,
+                coarse_conc_size,
+                coarse_count_size,
+                coarse_temperature_size,
+            },
         );
 
         Self::update_coarse_descriptor_set(
             &device,
             coarse_descriptor_sets[1],
-            src_buffer_a,
-            temperature_buffer_b,
-            solid_mask_buffer,
-            coarse_conc_buffer.buffer,
-            coarse_fluid_count_buffer.buffer,
-            coarse_temperature_buffer.buffer,
-            conc_buffer_size,
-            temperature_buffer_size,
-            mask_buffer_size,
-            coarse_conc_size,
-            coarse_count_size,
-            coarse_temperature_size,
+            CoarseDescriptorSetWrite {
+                full_conc_buffer: source_buffers.src_buffer_a,
+                full_temperature_buffer: source_buffers.temperature_buffer_b,
+                solid_mask_buffer: source_buffers.solid_mask_buffer,
+                coarse_conc_buffer: coarse_conc_buffer.buffer,
+                coarse_count_buffer: coarse_fluid_count_buffer.buffer,
+                coarse_temperature_buffer: coarse_temperature_buffer.buffer,
+                full_conc_size: source_buffers.conc_buffer_size,
+                full_temperature_size: source_buffers.temperature_buffer_size,
+                mask_size: source_buffers.mask_buffer_size,
+                coarse_conc_size,
+                coarse_count_size,
+                coarse_temperature_size,
+            },
         );
 
         Self::update_coarse_descriptor_set(
             &device,
             coarse_descriptor_sets[2],
-            src_buffer_b,
-            temperature_buffer_a,
-            solid_mask_buffer,
-            coarse_conc_buffer.buffer,
-            coarse_fluid_count_buffer.buffer,
-            coarse_temperature_buffer.buffer,
-            conc_buffer_size,
-            temperature_buffer_size,
-            mask_buffer_size,
-            coarse_conc_size,
-            coarse_count_size,
-            coarse_temperature_size,
+            CoarseDescriptorSetWrite {
+                full_conc_buffer: source_buffers.src_buffer_b,
+                full_temperature_buffer: source_buffers.temperature_buffer_a,
+                solid_mask_buffer: source_buffers.solid_mask_buffer,
+                coarse_conc_buffer: coarse_conc_buffer.buffer,
+                coarse_count_buffer: coarse_fluid_count_buffer.buffer,
+                coarse_temperature_buffer: coarse_temperature_buffer.buffer,
+                full_conc_size: source_buffers.conc_buffer_size,
+                full_temperature_size: source_buffers.temperature_buffer_size,
+                mask_size: source_buffers.mask_buffer_size,
+                coarse_conc_size,
+                coarse_count_size,
+                coarse_temperature_size,
+            },
         );
 
         Self::update_coarse_descriptor_set(
             &device,
             coarse_descriptor_sets[3],
-            src_buffer_b,
-            temperature_buffer_b,
-            solid_mask_buffer,
-            coarse_conc_buffer.buffer,
-            coarse_fluid_count_buffer.buffer,
-            coarse_temperature_buffer.buffer,
-            conc_buffer_size,
-            temperature_buffer_size,
-            mask_buffer_size,
-            coarse_conc_size,
-            coarse_count_size,
-            coarse_temperature_size,
+            CoarseDescriptorSetWrite {
+                full_conc_buffer: source_buffers.src_buffer_b,
+                full_temperature_buffer: source_buffers.temperature_buffer_b,
+                solid_mask_buffer: source_buffers.solid_mask_buffer,
+                coarse_conc_buffer: coarse_conc_buffer.buffer,
+                coarse_count_buffer: coarse_fluid_count_buffer.buffer,
+                coarse_temperature_buffer: coarse_temperature_buffer.buffer,
+                full_conc_size: source_buffers.conc_buffer_size,
+                full_temperature_size: source_buffers.temperature_buffer_size,
+                mask_size: source_buffers.mask_buffer_size,
+                coarse_conc_size,
+                coarse_count_size,
+                coarse_temperature_size,
+            },
         );
 
         // Create command pool and buffer for async readback
@@ -478,7 +504,7 @@ impl CoarseGrid {
             readback_command_buffer,
             readback_fence,
             readback_state: ReadbackState::Idle,
-            last_read_time: Instant::now() - Duration::from_secs(10), // Allow immediate first read
+            last_read_time: Instant::now() - Duration::from_secs(10),
             min_read_interval: Duration::from_millis(200),
             cached_cell: None,
             allocator,
@@ -488,43 +514,32 @@ impl CoarseGrid {
     fn update_coarse_descriptor_set(
         device: &ash::Device,
         set: vk::DescriptorSet,
-        full_conc_buffer: vk::Buffer,
-        full_temperature_buffer: vk::Buffer,
-        solid_mask_buffer: vk::Buffer,
-        coarse_conc_buffer: vk::Buffer,
-        coarse_count_buffer: vk::Buffer,
-        coarse_temperature_buffer: vk::Buffer,
-        full_conc_size: u64,
-        full_temperature_size: u64,
-        mask_size: u64,
-        coarse_conc_size: u64,
-        coarse_count_size: u64,
-        coarse_temperature_size: u64,
+        write: CoarseDescriptorSetWrite,
     ) {
         let full_conc_info = [vk::DescriptorBufferInfo::default()
-            .buffer(full_conc_buffer)
+            .buffer(write.full_conc_buffer)
             .offset(0)
-            .range(full_conc_size)];
+            .range(write.full_conc_size)];
         let full_temperature_info = [vk::DescriptorBufferInfo::default()
-            .buffer(full_temperature_buffer)
+            .buffer(write.full_temperature_buffer)
             .offset(0)
-            .range(full_temperature_size)];
+            .range(write.full_temperature_size)];
         let mask_info = [vk::DescriptorBufferInfo::default()
-            .buffer(solid_mask_buffer)
+            .buffer(write.solid_mask_buffer)
             .offset(0)
-            .range(mask_size)];
+            .range(write.mask_size)];
         let coarse_conc_info = [vk::DescriptorBufferInfo::default()
-            .buffer(coarse_conc_buffer)
+            .buffer(write.coarse_conc_buffer)
             .offset(0)
-            .range(coarse_conc_size)];
+            .range(write.coarse_conc_size)];
         let coarse_count_info = [vk::DescriptorBufferInfo::default()
-            .buffer(coarse_count_buffer)
+            .buffer(write.coarse_count_buffer)
             .offset(0)
-            .range(coarse_count_size)];
+            .range(write.coarse_count_size)];
         let coarse_temperature_info = [vk::DescriptorBufferInfo::default()
-            .buffer(coarse_temperature_buffer)
+            .buffer(write.coarse_temperature_buffer)
             .offset(0)
-            .range(coarse_temperature_size)];
+            .range(write.coarse_temperature_size)];
 
         let writes = [
             vk::WriteDescriptorSet::default()
@@ -609,8 +624,8 @@ impl CoarseGrid {
 
             // Dispatch: one thread per coarse cell per species
             // Using 8x8 workgroups
-            let groups_x = (self.coarse_width + 7) / 8;
-            let groups_y = (self.coarse_height + 7) / 8;
+            let groups_x = self.coarse_width.div_ceil(8);
+            let groups_y = self.coarse_height.div_ceil(8);
             let groups_z = self.species_count as u32;
             self.device.cmd_dispatch(cmd, groups_x, groups_y, groups_z);
         }

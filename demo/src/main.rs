@@ -13,12 +13,23 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+mod app_types;
+mod colors;
+mod tooltip;
+
 use anyhow::Result;
+use app_types::{
+    DetailPanelSlot, DetailProbeSnapshot, EntityKind, LeakChannelDraft, LeakChannelOverlay,
+    PerformanceSample, PerformanceSummary, PlacementState, RenderFrameMetrics, ScenarioBoxBounds,
+    SelectedEntity, SimulationViewport, TransformState,
+};
 use clap::{Parser, Subcommand};
+use colors::{compute_species_colors, leak_channel_color};
 use fluidsim::{Simulation, SimulationConfig};
 use renderer::{
     EguiRenderer, PresentModePreference, RenderContext, RenderPipeline, RenderViewport,
 };
+use tooltip::{format_async_inspection_tooltip, format_detail_probe_tooltip};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -36,206 +47,7 @@ const DETAIL_MARGIN_MIN: f32 = 108.0;
 const DETAIL_MARGIN_MAX: f32 = 220.0;
 const DETAIL_PANEL_WIDTH: f32 = 250.0;
 
-#[derive(Debug, Clone, Copy)]
-struct ScenarioBoxBounds {
-    outer_x0: u32,
-    outer_x1: u32,
-    inner_x0: u32,
-    inner_y0: u32,
-    inner_x1: u32,
-    inner_y1: u32,
-}
-
-impl ScenarioBoxBounds {
-    fn from_dimensions(width: u32, height: u32) -> Self {
-        let wall_thickness = 4u32;
-        let inner_size = (width.min(height) / 2).max(64);
-        let outer_size = inner_size + 2 * wall_thickness;
-
-        let center_x = width / 2;
-        let center_y = height / 2;
-
-        let outer_x0 = center_x - outer_size / 2;
-        let outer_y0 = center_y - outer_size / 2;
-        let outer_x1 = outer_x0 + outer_size;
-        let outer_y1 = outer_y0 + outer_size;
-
-        Self {
-            outer_x0,
-            outer_x1,
-            inner_x0: outer_x0 + wall_thickness,
-            inner_y0: outer_y0 + wall_thickness,
-            inner_x1: outer_x1 - wall_thickness,
-            inner_y1: outer_y1 - wall_thickness,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SimulationViewport {
-    rect: egui::Rect,
-    physical_x: u32,
-    physical_y: u32,
-    physical_width: u32,
-    physical_height: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum DetailPanelSlot {
-    TopRight,
-    BottomLeft,
-    TopCenter,
-    LeftCenter,
-    RightCenter,
-}
-
-impl DetailPanelSlot {
-    fn anchor(self) -> egui::Align2 {
-        match self {
-            Self::TopRight => egui::Align2::RIGHT_TOP,
-            Self::BottomLeft => egui::Align2::LEFT_BOTTOM,
-            Self::TopCenter => egui::Align2::CENTER_TOP,
-            Self::LeftCenter => egui::Align2::LEFT_CENTER,
-            Self::RightCenter => egui::Align2::RIGHT_CENTER,
-        }
-    }
-
-    fn offset(self) -> egui::Vec2 {
-        match self {
-            Self::TopRight => egui::vec2(-18.0, 18.0),
-            Self::BottomLeft => egui::vec2(18.0, -18.0),
-            Self::TopCenter => egui::vec2(0.0, 18.0),
-            Self::LeftCenter => egui::vec2(18.0, 110.0),
-            Self::RightCenter => egui::vec2(-18.0, 0.0),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct DetailProbeSnapshot {
-    title: &'static str,
-    slot: DetailPanelSlot,
-    sample_grid: (f32, f32),
-    coarse_coord: (u32, u32),
-    mip: u32,
-    tooltip_text: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PerformanceSample {
-    timestamp: Instant,
-    frame_ms: f32,
-    simulation_ms: f32,
-    tooltip_ms: f32,
-    ui_ms: f32,
-    render_ms: f32,
-    upload_ms: f32,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct RenderFrameMetrics {
-    upload_ms: f32,
-    render_ms: f32,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct PerformanceSummary {
-    current_frame_ms: f32,
-    current_fps: f32,
-    average_fps_30s: f32,
-    worst_frame_ms_30s: f32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct LeakChannelOverlay {
-    center: egui::Pos2,
-    sink: egui::Pos2,
-    source: egui::Pos2,
-    color: egui::Color32,
-    hovered: bool,
-    selected: bool,
-    ghost: bool,
-    valid: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntityKind {
-    LeakChannel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelectedEntity {
-    LeakChannel(usize),
-}
-
-#[derive(Debug, Clone)]
-struct LeakChannelDraft {
-    species_name: String,
-    rate: f32,
-    x: i32,
-    y: i32,
-    rotation_byte: u8,
-}
-
-impl LeakChannelDraft {
-    fn from_channel(channel: &fluidsim::LeakChannel, sim: &Simulation) -> Self {
-        let species_name = sim
-            .species_registry()
-            .get(channel.species)
-            .map(|species| species.name.to_string())
-            .unwrap_or_default();
-        Self {
-            species_name,
-            rate: channel.rate,
-            x: channel.x,
-            y: channel.y,
-            rotation_byte: channel.rotation_byte(),
-        }
-    }
-
-    fn to_channel(&self, sim: &Simulation) -> Result<fluidsim::LeakChannel> {
-        let species = sim
-            .species_registry()
-            .id_of(self.species_name.trim())
-            .ok_or_else(|| anyhow::anyhow!("Unknown species '{}'", self.species_name.trim()))?;
-        Ok(fluidsim::LeakChannel::new(
-            self.rate.max(0.0),
-            species,
-            self.x,
-            self.y,
-            self.rotation_byte as i8,
-        ))
-    }
-
-    fn rotate_eighth_turn(&mut self) {
-        self.rotation_byte = self
-            .rotation_byte
-            .wrapping_add(fluidsim::LeakChannel::EIGHTH_TURN);
-    }
-
-    fn rotation_degrees(&self) -> u32 {
-        let step = (self.rotation_byte as u32 + 16) / 32;
-        (step % 8) * 45
-    }
-
-    fn set_rotation_degrees(&mut self, degrees: u32) {
-        let snapped = ((degrees + 22) / 45) % 8;
-        self.rotation_byte = (snapped as u8).saturating_mul(fluidsim::LeakChannel::EIGHTH_TURN);
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PlacementState {
-    kind: EntityKind,
-    leak_channel: LeakChannelDraft,
-}
-
-#[derive(Debug, Clone)]
-struct TransformState {
-    entity: SelectedEntity,
-    leak_channel: LeakChannelDraft,
-    mouse_offset: (i32, i32),
-}
+type DetailProbeSpec = (&'static str, DetailPanelSlot, (f32, f32));
 
 /// Which scenario to run.
 #[derive(Debug, Clone, Copy, Default)]
@@ -639,7 +451,7 @@ impl DemoApp {
         ))
     }
 
-    fn detail_probe_specs(&self) -> Option<Vec<(&'static str, DetailPanelSlot, (f32, f32))>> {
+    fn detail_probe_specs(&self) -> Option<Vec<DetailProbeSpec>> {
         let bounds = self.scenario_box_bounds()?;
         let inset = (self.inspection_mip as f32 * 1.35).max(12.0);
         let outside = (self.inspection_mip as f32 * 1.75).max(14.0);
@@ -667,48 +479,6 @@ impl DemoApp {
             ("Outside Left", DetailPanelSlot::LeftCenter, outside_left),
             ("Outside Right", DetailPanelSlot::RightCenter, outside_right),
         ])
-    }
-
-    fn format_detail_probe_tooltip(result: &fluidsim::InspectionResult) -> String {
-        let mut lines = vec![
-            format!("Coarse: ({}, {})", result.coord.x, result.coord.y),
-            format!("Region: {}", result.content),
-            format!(
-                "Cells: {} fluid / {} solid",
-                result.fluid_cell_count, result.solid_cell_count
-            ),
-            format!(
-                "Temp: {:.2} K ({:.2} C)",
-                result.mean_temperature_kelvin,
-                result.mean_temperature_kelvin - 273.15,
-            ),
-        ];
-
-        if !result.species.is_empty() {
-            lines.push("Species:".to_string());
-            for entry in result.species.iter().take(4) {
-                lines.push(format!(
-                    "  {:<10} {:>7.3} M",
-                    entry.name, entry.concentration
-                ));
-            }
-            if result.species.len() > 4 {
-                lines.push(format!("  +{} more", result.species.len() - 4));
-            }
-        }
-
-        if !result.materials.is_empty() {
-            lines.push("Materials:".to_string());
-            for material in result.materials.iter().take(2) {
-                lines.push(format!(
-                    "  {} {:>5.0}%",
-                    material.name,
-                    material.fraction * 100.0
-                ));
-            }
-        }
-
-        lines.join("\n")
     }
 
     fn update_detail_probes(&mut self) {
@@ -740,7 +510,7 @@ impl DemoApp {
                     sample_grid,
                     coarse_coord: (result.coord.x, result.coord.y),
                     mip: result.coord.mip,
-                    tooltip_text: Self::format_detail_probe_tooltip(&result),
+                    tooltip_text: format_detail_probe_tooltip(&result),
                 }),
                 Err(error) => probes.push(DetailProbeSnapshot {
                     title,
@@ -833,10 +603,10 @@ impl DemoApp {
             if matches!(transform.entity, SelectedEntity::LeakChannel(_)) {
                 transform.leak_channel.rotate_eighth_turn();
             }
-        } else if let Some(placement) = &mut self.placement_state {
-            if placement.kind == EntityKind::LeakChannel {
-                placement.leak_channel.rotate_eighth_turn();
-            }
+        } else if let Some(placement) = &mut self.placement_state
+            && placement.kind == EntityKind::LeakChannel
+        {
+            placement.leak_channel.rotate_eighth_turn();
         }
     }
 
@@ -927,20 +697,19 @@ impl DemoApp {
 
     fn handle_primary_click(&mut self) {
         if self.transform_state.is_some() {
-            if let Some(selection) = self.selected_entity {
-                if let Some(channel) = self.preview_leak_channel() {
-                    if let Some(sim) = &mut self.simulation {
-                        match selection {
-                            SelectedEntity::LeakChannel(index) => {
-                                match sim.update_leak_channel(index, channel) {
-                                    Ok(()) => {
-                                        self.transform_state = None;
-                                        self.select_entity(Some(selection));
-                                    }
-                                    Err(error) => {
-                                        self.inspector_error = Some(error.to_string());
-                                    }
-                                }
+            if let Some(selection) = self.selected_entity
+                && let Some(channel) = self.preview_leak_channel()
+                && let Some(sim) = &mut self.simulation
+            {
+                match selection {
+                    SelectedEntity::LeakChannel(index) => {
+                        match sim.update_leak_channel(index, channel) {
+                            Ok(()) => {
+                                self.transform_state = None;
+                                self.select_entity(Some(selection));
+                            }
+                            Err(error) => {
+                                self.inspector_error = Some(error.to_string());
                             }
                         }
                     }
@@ -950,17 +719,17 @@ impl DemoApp {
         }
 
         if self.placement_state.is_some() {
-            if let Some(channel) = self.preview_leak_channel() {
-                if let Some(sim) = &mut self.simulation {
-                    match sim.add_leak_channel(channel) {
-                        Ok(()) => {
-                            let index = sim.leak_channels().len().saturating_sub(1);
-                            self.placement_state = None;
-                            self.select_entity(Some(SelectedEntity::LeakChannel(index)));
-                        }
-                        Err(error) => {
-                            self.inspector_error = Some(error.to_string());
-                        }
+            if let Some(channel) = self.preview_leak_channel()
+                && let Some(sim) = &mut self.simulation
+            {
+                match sim.add_leak_channel(channel) {
+                    Ok(()) => {
+                        let index = sim.leak_channels().len().saturating_sub(1);
+                        self.placement_state = None;
+                        self.select_entity(Some(SelectedEntity::LeakChannel(index)));
+                    }
+                    Err(error) => {
+                        self.inspector_error = Some(error.to_string());
                     }
                 }
             }
@@ -1005,11 +774,7 @@ impl DemoApp {
             .get(channel.species)
             .map(|species| species.name.as_ref())
             .unwrap_or("?");
-        let color = match species_name {
-            "Na+" => egui::Color32::from_rgb(242, 102, 74),
-            "K+" => egui::Color32::from_rgb(92, 214, 110),
-            _ => egui::Color32::from_rgb(230, 230, 230),
-        };
+        let color = leak_channel_color(species_name);
 
         if let Some(((sink_x, sink_y), (source_x, source_y))) =
             sim.resolve_leak_channel_endpoints(&channel)
@@ -1061,20 +826,19 @@ impl DemoApp {
                         if ui
                             .button(RichText::new(if paused { "PLAY" } else { "PAUSE" }).strong())
                             .clicked()
+                            && let Some(sim) = self.simulation.as_mut()
                         {
-                            if let Some(sim) = self.simulation.as_mut() {
-                                sim.toggle_pause();
-                                log::info!(
-                                    "Simulation {}",
-                                    if sim.is_paused() { "paused" } else { "resumed" }
-                                );
-                            }
+                            sim.toggle_pause();
+                            log::info!(
+                                "Simulation {}",
+                                if sim.is_paused() { "paused" } else { "resumed" }
+                            );
                         }
 
-                        if ui.button(RichText::new("RESTART").strong()).clicked() {
-                            if let Err(error) = self.reset_simulation() {
-                                log::error!("Failed to restart simulation: {}", error);
-                            }
+                        if ui.button(RichText::new("RESTART").strong()).clicked()
+                            && let Err(error) = self.reset_simulation()
+                        {
+                            log::error!("Failed to restart simulation: {}", error);
                         }
 
                         if ui.button(RichText::new("CREATE").strong()).clicked() {
@@ -1280,65 +1044,23 @@ impl DemoApp {
         self.last_tooltip_coord = coarse_coord;
 
         if let Some(data) = sim.poll_async_inspection() {
-            let mut species_rows: Vec<_> = data
-                .concentrations
-                .iter()
-                .enumerate()
-                .filter(|&(_, c)| *c > 0.001)
-                .map(|(i, c)| {
-                    let name = self.species_names.get(i).map(|s| s.as_str()).unwrap_or("?");
-                    (name.to_string(), *c)
-                })
-                .collect();
-            species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let species_lines: String = species_rows
-                .iter()
-                .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.tooltip_text = format!(
-                "Coarse Cell ({}, {})\n\
-                 Fluid: {} / Solid: {}\n\
-                 Temp: {:.2} K ({:.2} C)\n\
-                 Species:\n{}",
-                data.coord.0,
-                data.coord.1,
+            self.tooltip_text = format_async_inspection_tooltip(
+                data.coord,
                 data.fluid_count,
                 data.solid_count,
                 data.mean_temperature_kelvin,
-                data.mean_temperature_kelvin - 273.15,
-                species_lines,
+                &data.concentrations,
+                &self.species_names,
             );
             self.show_tooltip = true;
         } else if let Some(data) = cached_data {
-            let mut species_rows: Vec<_> = data
-                .concentrations
-                .iter()
-                .enumerate()
-                .filter(|&(_, c)| *c > 0.001)
-                .map(|(i, c)| {
-                    let name = self.species_names.get(i).map(|s| s.as_str()).unwrap_or("?");
-                    (name.to_string(), *c)
-                })
-                .collect();
-            species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let species_lines: String = species_rows
-                .iter()
-                .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.tooltip_text = format!(
-                "Coarse Cell ({}, {})\n\
-                 Fluid: {} / Solid: {}\n\
-                 Temp: {:.2} K ({:.2} C)\n\
-                 Species:\n{}",
-                data.coord.0,
-                data.coord.1,
+            self.tooltip_text = format_async_inspection_tooltip(
+                data.coord,
                 data.fluid_count,
                 data.solid_count,
                 data.mean_temperature_kelvin,
-                data.mean_temperature_kelvin - 273.15,
-                species_lines,
+                &data.concentrations,
+                &self.species_names,
             );
             self.show_tooltip = true;
         } else {
@@ -1658,11 +1380,7 @@ impl DemoApp {
                 .get(channel.species)
                 .map(|info| info.name.as_ref())
                 .unwrap_or("?");
-            let color = match species_name {
-                "Na+" => egui::Color32::from_rgb(242, 102, 74),
-                "K+" => egui::Color32::from_rgb(92, 214, 110),
-                _ => egui::Color32::from_rgb(230, 230, 230),
-            };
+            let color = leak_channel_color(species_name);
             overlays.push(LeakChannelOverlay {
                 center,
                 sink,
@@ -2119,7 +1837,7 @@ impl DemoApp {
 
         // Debug: Log frame presentation
         let step = sim.step_count();
-        if step > 0 && step % 100 == 0 {
+        if step > 0 && step.is_multiple_of(100) {
             log::info!(
                 "Frame timing: bind={:.1}ms",
                 (t1 - t0).as_secs_f64() * 1000.0
@@ -2391,10 +2109,10 @@ impl ApplicationHandler for DemoApp {
                 let dt = frame_start.duration_since(self.last_frame);
 
                 let t0 = Instant::now();
-                if let Some(sim) = &mut self.simulation {
-                    if let Err(e) = sim.step(dt.as_secs_f32()) {
-                        log::error!("Simulation step failed: {}", e);
-                    }
+                if let Some(sim) = &mut self.simulation
+                    && let Err(e) = sim.step(dt.as_secs_f32())
+                {
+                    log::error!("Simulation step failed: {}", e);
                 }
                 let t1 = Instant::now();
 
@@ -2413,7 +2131,6 @@ impl ApplicationHandler for DemoApp {
                     leak_channel_overlays.push(ghost);
                 }
 
-                // Render egui overlay (not actually rendered to screen)
                 if self.egui_renderer.is_some() && self.window.is_some() {
                     {
                         let window = self.window.as_ref().unwrap();
@@ -2433,7 +2150,6 @@ impl ApplicationHandler for DemoApp {
                     Self::draw_leak_channels(&egui_ctx, &leak_channel_overlays);
                     self.draw_detail_probes(&egui_ctx);
 
-                    // Show tooltip near mouse
                     if self.show_tooltip {
                         egui::Window::new("Inspection")
                             .order(egui::Order::Tooltip)
@@ -2460,13 +2176,12 @@ impl ApplicationHandler for DemoApp {
                 }
                 let t3 = Instant::now();
 
-                // Render simulation
-                if self.needs_resize {
-                    if let Some(window) = &self.window {
-                        let size = window.inner_size();
-                        if let Err(e) = self.handle_resize(size.width, size.height) {
-                            log::error!("Resize failed: {}", e);
-                        }
+                if self.needs_resize
+                    && let Some(window) = &self.window
+                {
+                    let size = window.inner_size();
+                    if let Err(e) = self.handle_resize(size.width, size.height) {
+                        log::error!("Resize failed: {}", e);
                     }
                 }
 
@@ -2490,18 +2205,19 @@ impl ApplicationHandler for DemoApp {
                 });
 
                 // Log step count periodically
-                if let Some(sim) = &self.simulation {
-                    if sim.step_count() > 0 && sim.step_count() % 100 == 0 {
-                        log::info!(
-                            "Step {}: sim={:.1}ms tooltip={:.1}ms egui={:.1}ms render={:.1}ms total={:.1}ms",
-                            sim.step_count(),
-                            (t1 - t0).as_secs_f64() * 1000.0,
-                            (t2 - t1).as_secs_f64() * 1000.0,
-                            (t3 - t2).as_secs_f64() * 1000.0,
-                            (t4 - t3).as_secs_f64() * 1000.0,
-                            (t4 - frame_start).as_secs_f64() * 1000.0
-                        );
-                    }
+                if let Some(sim) = &self.simulation
+                    && sim.step_count() > 0
+                    && sim.step_count().is_multiple_of(100)
+                {
+                    log::info!(
+                        "Step {}: sim={:.1}ms tooltip={:.1}ms egui={:.1}ms render={:.1}ms total={:.1}ms",
+                        sim.step_count(),
+                        (t1 - t0).as_secs_f64() * 1000.0,
+                        (t2 - t1).as_secs_f64() * 1000.0,
+                        (t3 - t2).as_secs_f64() * 1000.0,
+                        (t4 - t3).as_secs_f64() * 1000.0,
+                        (t4 - frame_start).as_secs_f64() * 1000.0
+                    );
                 }
 
                 // Update timing
@@ -2570,67 +2286,6 @@ impl Drop for DemoApp {
         drop(render_ctx.take());
         drop(window);
         log::info!("DemoApp::drop - cleanup complete");
-    }
-}
-
-/// Compute species colors: explicit overrides for known species, hash-based fallback.
-fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]> {
-    use std::collections::HashMap;
-
-    // Explicit color assignments for known species (RGB, visually distinct from water blue)
-    let overrides: HashMap<&str, [f32; 3]> = HashMap::from([
-        ("Na+", [1.0, 0.22, 0.08]),      // Hot orange-red
-        ("K+", [0.12, 0.92, 0.22]),      // Electric green
-        ("Cl-", [1.0, 0.86, 0.08]),      // Acid yellow
-        ("H+", [1.0, 0.14, 0.58]),       // Magenta
-        ("OH-", [0.38, 0.18, 1.0]),      // Vivid violet
-        ("Ca2+", [1.0, 0.52, 0.06]),     // Burning orange
-        ("SO4(2-)", [0.05, 0.82, 0.92]), // Bright cyan
-        ("CH3COOH", [0.22, 0.95, 0.66]), // Neon mint
-        ("CH3COO-", [1.0, 0.62, 0.12]),  // Amber
-    ]);
-
-    registry
-        .iter()
-        .map(|info| {
-            if let Some(&rgb) = overrides.get(info.name.as_ref()) {
-                [rgb[0], rgb[1], rgb[2], 1.0]
-            } else {
-                // Hash-based fallback: golden ratio distribution, avoid water-blue hue
-                let mut h = (info.index as f32 * 0.618033988749895).fract();
-                for _ in 0..8 {
-                    let dist = (h - 0.54).abs().min(1.0 - (h - 0.54).abs());
-                    if dist >= 0.12 {
-                        break;
-                    }
-                    h = (h + 0.17).fract();
-                }
-                let rgb = hue_to_rgb(h);
-                let r = 0.5 + (rgb[0] - 0.5) * 1.1;
-                let g = 0.5 + (rgb[1] - 0.5) * 1.1;
-                let b = 0.5 + (rgb[2] - 0.5) * 1.1;
-                [r, g, b, 1.0]
-            }
-        })
-        .collect()
-}
-
-/// Convert hue (0..1) to RGB.
-fn hue_to_rgb(h: f32) -> [f32; 3] {
-    let hue = h * 6.0;
-    let x = 1.0 - (hue % 2.0 - 1.0).abs();
-    if hue < 1.0 {
-        [1.0, x, 0.0]
-    } else if hue < 2.0 {
-        [x, 1.0, 0.0]
-    } else if hue < 3.0 {
-        [0.0, 1.0, x]
-    } else if hue < 4.0 {
-        [0.0, x, 1.0]
-    } else if hue < 5.0 {
-        [x, 0.0, 1.0]
-    } else {
-        [1.0, 0.0, x]
     }
 }
 

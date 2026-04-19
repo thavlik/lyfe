@@ -69,9 +69,10 @@ pub struct MichaelisMentenKinetics {
 }
 
 /// How transport should behave at a boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BoundaryTransportMode {
     /// Normal diffusive transport
+    #[default]
     Normal,
     /// Impermeable barrier (no transport)
     Impermeable,
@@ -81,12 +82,6 @@ pub enum BoundaryTransportMode {
     Selective,
     /// One-way transport (from A to B only)
     Directional,
-}
-
-impl Default for BoundaryTransportMode {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Override for miscibility between species or phases.

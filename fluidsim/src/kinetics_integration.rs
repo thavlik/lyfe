@@ -22,7 +22,7 @@
 //! - Evaluation errors (continue with prior parameters)
 
 use crate::gpu::GpuReactionRule;
-use crate::semantic::{SemanticConfig, SemanticSnapshotBuilder};
+use crate::semantic::{SemanticConfig, SemanticSnapshotBuilder, SemanticSnapshotInput};
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 use anyhow::Result;
@@ -128,32 +128,24 @@ impl KineticsIntegration {
     /// It builds a snapshot, evaluates it, and returns the update.
     pub fn evaluate(
         &mut self,
-        fine_width: u32,
-        fine_height: u32,
-        sim_time: f64,
-        concentrations: &[Vec<f32>],
-        solid_mask: &[u32],
-        material_ids: &[u32],
-        temperatures: &[f32],
-        species_registry: &SpeciesRegistry,
-        material_registry: &MaterialRegistry,
+        input: SemanticSnapshotInput<'_>,
     ) -> Result<&SemanticUpdate, KineticsError> {
         // Build snapshot
         let snapshot_start = std::time::Instant::now();
-        let dt_window = sim_time - self.last_snapshot_time;
+        let dt_window = input.sim_time - self.last_snapshot_time;
 
-        let snapshot = self.snapshot_builder.build(
-            fine_width,
-            fine_height,
-            sim_time,
+        let snapshot = self.snapshot_builder.build(SemanticSnapshotInput {
+            fine_width: input.fine_width,
+            fine_height: input.fine_height,
+            sim_time: input.sim_time,
             dt_window,
-            concentrations,
-            solid_mask,
-            material_ids,
-            temperatures,
-            species_registry,
-            material_registry,
-        );
+            concentrations: input.concentrations,
+            solid_mask: input.solid_mask,
+            material_ids: input.material_ids,
+            temperatures: input.temperatures,
+            species_registry: input.species_registry,
+            material_registry: input.material_registry,
+        });
 
         let snapshot_time = snapshot_start.elapsed().as_secs_f64() * 1000.0;
         self.stats.snapshots_generated += 1;
@@ -186,7 +178,7 @@ impl KineticsIntegration {
 
                 // Reset accumulator
                 self.time_since_last_evaluation = 0.0;
-                self.last_snapshot_time = sim_time;
+                self.last_snapshot_time = input.sim_time;
 
                 // Cache the update
                 self.last_update = Some(update);
@@ -203,8 +195,8 @@ impl KineticsIntegration {
                 } else {
                     // Create a fallback no-op update
                     self.last_update = Some(SemanticUpdate::noop(
-                        sim_time,
-                        sim_time + self.evaluation_interval,
+                        input.sim_time,
+                        input.sim_time + self.evaluation_interval,
                     ));
                     Ok(self.last_update.as_ref().unwrap())
                 }
@@ -503,19 +495,19 @@ impl SemanticUpdateApplicator {
         let enthalpy = directive.enthalpy_delta_j_per_mol.unwrap_or(0.0) as f32;
         let entropy = directive.entropy_delta_j_per_mol_k.unwrap_or(0.0) as f32;
 
-        Some(GpuReactionRule::new(
-            a_idx,
-            b_idx,
-            product_a_idx,
-            product_b_idx,
-            catalyst_idx,
+        Some(GpuReactionRule::new(crate::gpu::GpuReactionRuleConfig {
+            reactant_a_index: a_idx,
+            reactant_b_index: b_idx,
+            product_a_index: product_a_idx,
+            product_b_index: product_b_idx,
+            catalyst_index: catalyst_idx,
             kinetic_model,
             rate,
             km_reactant_a,
             km_reactant_b,
             enthalpy,
             entropy,
-        ))
+        }))
     }
 }
 

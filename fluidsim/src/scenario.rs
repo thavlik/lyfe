@@ -6,7 +6,7 @@
 use crate::enzyme::{EnzymeEntity, EnzymeField};
 use crate::grid::{CellCoord, Grid};
 use crate::leak::LeakChannel;
-use crate::solid::{MaterialId, MaterialRegistry, SolidGeometry};
+use crate::solid::{MaterialId, MaterialRegistry, SolidGeometry, SolidRect};
 use crate::species::{SpeciesConcentrations, SpeciesRegistry};
 use ahash::AHashMap;
 
@@ -147,8 +147,12 @@ impl ScenarioBuilder {
         thickness: u32,
         material: MaterialId,
     ) -> Self {
-        self.solid_geometry
-            .fill_hollow_rect(x0, y0, x1, y1, thickness, self.grid.width, material);
+        self.solid_geometry.fill_hollow_rect(
+            SolidRect { x0, y0, x1, y1 },
+            thickness,
+            self.grid.width,
+            material,
+        );
         self
     }
 

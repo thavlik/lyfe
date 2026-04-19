@@ -156,11 +156,10 @@ impl KineticsConfig {
                     .to_string(),
             );
         }
-        if self.enable_lean && self.lean_library_path.is_some() {
-            let path = self.lean_library_path.as_ref().unwrap();
-            if !path.exists() {
-                return Err(format!("Lean library path does not exist: {:?}", path));
-            }
+        if let (true, Some(path)) = (self.enable_lean, self.lean_library_path.as_ref())
+            && !path.exists()
+        {
+            return Err(format!("Lean library path does not exist: {:?}", path));
         }
         Ok(())
     }

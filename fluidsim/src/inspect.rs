@@ -164,6 +164,17 @@ impl Default for Inspector {
     }
 }
 
+pub struct InspectionInput<'a> {
+    pub concentrations: &'a [Vec<f32>],
+    pub temperatures: &'a [f32],
+    pub solid_mask: &'a [u32],
+    pub material_ids: &'a [u32],
+    pub grid_width: u32,
+    pub grid_height: u32,
+    pub species_registry: &'a SpeciesRegistry,
+    pub material_registry: &'a MaterialRegistry,
+}
+
 impl Inspector {
     pub fn new(default_mip: u32) -> Self {
         Self {
@@ -182,57 +193,36 @@ impl Inspector {
     }
 
     /// Aggregate inspection data from concentration and material buffers.
-    ///
-    /// # Arguments
-    /// - `coord`: Coarse cell to inspect
-    /// - `concentrations`: `[species][cell]` concentration data
-    /// - `solid_mask`: Per-cell solid flag
-    /// - `material_ids`: Per-cell material ID
-    /// - `grid_width`: Width of the fine grid
-    /// - `grid_height`: Height of the fine grid
-    /// - `species_registry`: For looking up species names
-    /// - `material_registry`: For looking up material names
-    pub fn inspect(
-        &self,
-        coord: CoarseCellCoord,
-        concentrations: &[Vec<f32>],
-        temperatures: &[f32],
-        solid_mask: &[u32],
-        material_ids: &[u32],
-        grid_width: u32,
-        grid_height: u32,
-        species_registry: &SpeciesRegistry,
-        material_registry: &MaterialRegistry,
-    ) -> InspectionResult {
+    pub fn inspect(&self, coord: CoarseCellCoord, input: InspectionInput<'_>) -> InspectionResult {
         let (x0, y0, x1, y1) = coord.fine_bounds();
 
         // Clamp to grid bounds
-        let x1 = x1.min(grid_width);
-        let y1 = y1.min(grid_height);
+        let x1 = x1.min(input.grid_width);
+        let y1 = y1.min(input.grid_height);
 
-        if x0 >= grid_width || y0 >= grid_height {
+        if x0 >= input.grid_width || y0 >= input.grid_height {
             return InspectionResult::empty(coord);
         }
 
         // Count cells and accumulate species
         let mut fluid_count = 0u32;
         let mut solid_count = 0u32;
-        let mut species_sums = vec![0.0f64; species_registry.count()];
-        let mut material_counts = vec![0u32; material_registry.count()];
+        let mut species_sums = vec![0.0f64; input.species_registry.count()];
+        let mut material_counts = vec![0u32; input.material_registry.count()];
         let mut temperature_sum = 0.0f64;
         let mut temperature_samples = 0u32;
 
         for y in y0..y1 {
             for x in x0..x1 {
-                let idx = (y * grid_width + x) as usize;
-                if let Some(&temperature) = temperatures.get(idx) {
+                let idx = (y * input.grid_width + x) as usize;
+                if let Some(&temperature) = input.temperatures.get(idx) {
                     temperature_sum += temperature as f64;
                     temperature_samples += 1;
                 }
 
-                if solid_mask.get(idx).copied().unwrap_or(0) != 0 {
+                if input.solid_mask.get(idx).copied().unwrap_or(0) != 0 {
                     solid_count += 1;
-                    let mat_id = material_ids.get(idx).copied().unwrap_or(0) as usize;
+                    let mat_id = input.material_ids.get(idx).copied().unwrap_or(0) as usize;
                     if mat_id < material_counts.len() {
                         material_counts[mat_id] += 1;
                     }
@@ -240,7 +230,7 @@ impl Inspector {
                     fluid_count += 1;
 
                     // Accumulate species concentrations
-                    for (species_idx, conc_buffer) in concentrations.iter().enumerate() {
+                    for (species_idx, conc_buffer) in input.concentrations.iter().enumerate() {
                         if let Some(&conc) = conc_buffer.get(idx) {
                             species_sums[species_idx] += conc as f64;
                         }
@@ -264,7 +254,7 @@ impl Inspector {
         // Build species entries (average over fluid cells)
         let mut species = Vec::new();
         if fluid_count > 0 {
-            for info in species_registry.iter() {
+            for info in input.species_registry.iter() {
                 let avg = species_sums[info.index] / fluid_count as f64;
                 if avg > self.epsilon {
                     species.push(SpeciesEntry {
@@ -284,7 +274,8 @@ impl Inspector {
         for (mat_idx, &count) in material_counts.iter().enumerate() {
             if count > 0 && mat_idx > 0 {
                 // Skip "none" material at index 0
-                if let Some(mat_info) = material_registry.get(MaterialId::new(mat_idx as u32)) {
+                if let Some(mat_info) = input.material_registry.get(MaterialId::new(mat_idx as u32))
+                {
                     materials.push(MaterialEntry {
                         name: mat_info.name.to_string(),
                         id: mat_info.id,

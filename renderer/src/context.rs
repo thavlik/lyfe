@@ -211,8 +211,7 @@ impl RenderContext {
         let format = surface_formats
             .iter()
             .find(|f| f.format == vk::Format::B8G8R8A8_SRGB)
-            .unwrap_or(&surface_formats[0])
-            .clone();
+            .unwrap_or(&surface_formats[0]);
 
         // Choose present mode (prefer mailbox for low latency)
         let present_mode = present_mode_preference.select(raw_display_handle, &present_modes);

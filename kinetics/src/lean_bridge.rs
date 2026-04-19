@@ -55,14 +55,14 @@ impl LeanBridge {
         }
 
         // 3. PATH lookup
-        if let Ok(output) = Command::new("which").arg("lyfe-rules").output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let path = PathBuf::from(&path_str);
-                if path.is_file() {
-                    log::info!("Lean binary from PATH: {}", path.display());
-                    return Ok(Self { binary_path: path });
-                }
+        if let Ok(output) = Command::new("which").arg("lyfe-rules").output()
+            && output.status.success()
+        {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = PathBuf::from(&path_str);
+            if path.is_file() {
+                log::info!("Lean binary from PATH: {}", path.display());
+                return Ok(Self { binary_path: path });
             }
         }
 

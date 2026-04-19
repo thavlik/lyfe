@@ -7,15 +7,18 @@
 use crate::chemistry::{ChemicalEvolutionRule, NoOpEvolution};
 use crate::coarse::CoarseCellData;
 use crate::enzyme::{EnzymeEntity, EnzymeField};
-use crate::gpu::{GpuRenderBuffers, GpuSimulation, SharedGpuContext};
+use crate::gpu::{
+    GpuRenderBuffers, GpuSimulation, GpuSimulationCreateInfo, SharedGpuContext, StepFrameParams,
+};
 use crate::grid::Grid;
-use crate::inspect::{InspectionResult, Inspector};
+use crate::inspect::{InspectionInput, InspectionResult, Inspector};
 use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
 use crate::leak::LeakChannel;
 use crate::scenario::{
     Scenario, create_acid_base_scenario, create_buffers_scenario, create_catalyst_scenario,
     create_demo_scenario, create_enzyme_scenario, create_leak_scenario,
 };
+use crate::semantic::SemanticSnapshotInput;
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
@@ -196,26 +199,28 @@ impl Simulation {
         let mut gpu = if let Some(context) = context {
             GpuSimulation::new_with_shared_context(
                 context,
-                scenario.grid.width,
-                scenario.grid.height,
-                scenario.species_registry.count(),
-                &concentrations,
-                &solid_mask,
-                &material_ids,
-                &diffusion_coeffs,
-                &species_charges,
+                GpuSimulationCreateInfo {
+                    width: scenario.grid.width,
+                    height: scenario.grid.height,
+                    species_count: scenario.species_registry.count(),
+                    initial_concentrations: &concentrations,
+                    solid_mask_data: &solid_mask,
+                    material_ids_data: &material_ids,
+                    diffusion_coeffs_data: &diffusion_coeffs,
+                    species_charges_data: &species_charges,
+                },
             )?
         } else {
-            GpuSimulation::new(
-                scenario.grid.width,
-                scenario.grid.height,
-                scenario.species_registry.count(),
-                &concentrations,
-                &solid_mask,
-                &material_ids,
-                &diffusion_coeffs,
-                &species_charges,
-            )?
+            GpuSimulation::new(GpuSimulationCreateInfo {
+                width: scenario.grid.width,
+                height: scenario.grid.height,
+                species_count: scenario.species_registry.count(),
+                initial_concentrations: &concentrations,
+                solid_mask_data: &solid_mask,
+                material_ids_data: &material_ids,
+                diffusion_coeffs_data: &diffusion_coeffs,
+                species_charges_data: &species_charges,
+            })?
         };
 
         gpu.init_reaction_pipeline(&temperatures)?;
@@ -282,17 +287,18 @@ impl Simulation {
 
         kinetics.set_evaluation_interval(Self::MIN_KINETICS_INTERVAL_SECONDS);
 
-        let update_result = kinetics.evaluate(
-            self.grid.width,
-            self.grid.height,
-            self.time,
+        let update_result = kinetics.evaluate(SemanticSnapshotInput {
+            fine_width: self.grid.width,
+            fine_height: self.grid.height,
+            sim_time: self.time,
+            dt_window: 0.0,
             concentrations,
             solid_mask,
             material_ids,
             temperatures,
-            &self.species_registry,
-            &self.material_registry,
-        );
+            species_registry: &self.species_registry,
+            material_registry: &self.material_registry,
+        });
 
         match update_result {
             Ok(update) => {
@@ -514,12 +520,14 @@ impl Simulation {
         self.prepare_dynamic_entities(step.sim_dt)?;
         self.gpu.record_step_frame(
             cmd,
-            step.substeps,
-            step.substep_dt,
-            step.diffusion_rate,
-            step.charge_correction_strength,
-            step.reaction_dt,
-            step.thermal_diffusivity,
+            StepFrameParams {
+                substeps: step.substeps,
+                substep_dt: step.substep_dt,
+                diffusion_rate: step.diffusion_rate,
+                charge_correction_strength: step.charge_correction_strength,
+                reaction_dt: step.reaction_dt,
+                thermal_diffusivity: step.thermal_diffusivity,
+            },
         );
         Ok(())
     }
@@ -575,17 +583,18 @@ impl Simulation {
         let material_registry = self.material_registry.clone();
 
         if let Some(ref mut kinetics) = self.kinetics {
-            match kinetics.evaluate(
+            match kinetics.evaluate(SemanticSnapshotInput {
                 fine_width,
                 fine_height,
                 sim_time,
-                &concentrations,
-                &solid_mask,
-                &material_ids,
-                &temperatures,
-                &species_registry,
-                &material_registry,
-            ) {
+                dt_window: 0.0,
+                concentrations: &concentrations,
+                solid_mask: &solid_mask,
+                material_ids: &material_ids,
+                temperatures: &temperatures,
+                species_registry: &species_registry,
+                material_registry: &material_registry,
+            }) {
                 Ok(update) => {
                     let (_applied, gpu_rules) = self.update_applicator.apply(
                         update,
@@ -662,14 +671,16 @@ impl Simulation {
 
         let result = self.inspector.inspect(
             coord,
-            self.cached_concentrations.as_ref().unwrap(),
-            self.cached_temperatures.as_ref().unwrap(),
-            self.cached_solid_mask.as_ref().unwrap(),
-            self.cached_material_ids.as_ref().unwrap(),
-            self.grid.width,
-            self.grid.height,
-            &self.species_registry,
-            &self.material_registry,
+            InspectionInput {
+                concentrations: self.cached_concentrations.as_ref().unwrap(),
+                temperatures: self.cached_temperatures.as_ref().unwrap(),
+                solid_mask: self.cached_solid_mask.as_ref().unwrap(),
+                material_ids: self.cached_material_ids.as_ref().unwrap(),
+                grid_width: self.grid.width,
+                grid_height: self.grid.height,
+                species_registry: &self.species_registry,
+                material_registry: &self.material_registry,
+            },
         );
 
         Ok(result)
@@ -680,8 +691,8 @@ impl Simulation {
     pub fn render_state(&mut self) -> Result<RenderState> {
         // Only refresh every 4 steps to avoid expensive GPU readback every frame
         // This trades some visual latency for much better frame rate
-        let should_refresh =
-            self.cache_dirty && (self.step_count % 4 == 0 || self.cached_concentrations.is_none());
+        let should_refresh = self.cache_dirty
+            && (self.step_count.is_multiple_of(4) || self.cached_concentrations.is_none());
 
         if should_refresh {
             self.refresh_cache()?;

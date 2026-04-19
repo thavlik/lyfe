@@ -84,14 +84,14 @@ impl EguiRenderer {
 
     /// Update textures before rendering (must be called before cmd_draw)
     pub fn set_textures(&mut self, ctx: &RenderContext) -> Result<()> {
-        if let Some(output) = &self.cached_output {
-            if !output.textures_delta.set.is_empty() {
-                self.renderer.set_textures(
-                    ctx.graphics_queue,
-                    ctx.command_pool,
-                    &output.textures_delta.set,
-                )?;
-            }
+        if let Some(output) = &self.cached_output
+            && !output.textures_delta.set.is_empty()
+        {
+            self.renderer.set_textures(
+                ctx.graphics_queue,
+                ctx.command_pool,
+                &output.textures_delta.set,
+            )?;
         }
         Ok(())
     }
@@ -113,10 +113,10 @@ impl EguiRenderer {
 
     /// Free textures after rendering is complete.
     pub fn free_textures(&mut self) -> Result<()> {
-        if let Some(output) = self.cached_output.take() {
-            if !output.textures_delta.free.is_empty() {
-                self.renderer.free_textures(&output.textures_delta.free)?;
-            }
+        if let Some(output) = self.cached_output.take()
+            && !output.textures_delta.free.is_empty()
+        {
+            self.renderer.free_textures(&output.textures_delta.free)?;
         }
         Ok(())
     }

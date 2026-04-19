@@ -207,7 +207,7 @@ impl BoundarySummary {
 }
 
 /// Snapshot of the species registry for kinetics context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpeciesTableSnapshot {
     /// Species IDs in dense index order
     pub species_ids: Vec<SpeciesId>,
@@ -217,32 +217,13 @@ pub struct SpeciesTableSnapshot {
     pub diffusion_coefficients: Vec<f32>,
 }
 
-impl Default for SpeciesTableSnapshot {
-    fn default() -> Self {
-        Self {
-            species_ids: Vec::new(),
-            species_names: Vec::new(),
-            diffusion_coefficients: Vec::new(),
-        }
-    }
-}
-
 /// Snapshot of the materials registry for kinetics context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MaterialsTableSnapshot {
     /// Material IDs in dense index order
     pub material_ids: Vec<MaterialId>,
     /// Material names (parallel to material_ids)
     pub material_names: Vec<String>,
-}
-
-impl Default for MaterialsTableSnapshot {
-    fn default() -> Self {
-        Self {
-            material_ids: Vec::new(),
-            material_names: Vec::new(),
-        }
-    }
 }
 
 /// The complete semantic snapshot of simulation state.

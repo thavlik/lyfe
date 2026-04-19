@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 
 use std::sync::Arc;
 
-use crate::coarse::CoarseGrid;
+use crate::coarse::{CoarseGrid, CoarseGridCreateInfo, CoarseGridSourceBuffers};
 use crate::enzyme::EnzymeEntity;
 use crate::leak::LeakChannel;
 use crate::species::SpeciesRegistry;
@@ -173,34 +173,57 @@ pub struct GpuEnzymeEntity {
     pub km_atp: f32,
 }
 
+pub struct GpuReactionRuleConfig {
+    pub reactant_a_index: u32,
+    pub reactant_b_index: Option<u32>,
+    pub product_a_index: Option<u32>,
+    pub product_b_index: Option<u32>,
+    pub catalyst_index: Option<u32>,
+    pub kinetic_model: u32,
+    pub rate: f32,
+    pub km_reactant_a: f32,
+    pub km_reactant_b: f32,
+    pub enthalpy: f32,
+    pub entropy: f32,
+}
+
+pub struct GpuSimulationCreateInfo<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub species_count: usize,
+    pub initial_concentrations: &'a [Vec<f32>],
+    pub solid_mask_data: &'a [u32],
+    pub material_ids_data: &'a [u32],
+    pub diffusion_coeffs_data: &'a [f32],
+    pub species_charges_data: &'a [i32],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StepFrameParams {
+    pub substeps: u32,
+    pub substep_dt: f32,
+    pub diffusion_rate: f32,
+    pub charge_correction_strength: f32,
+    pub reaction_dt: f32,
+    pub thermal_diffusivity: f32,
+}
+
 impl GpuReactionRule {
     pub const NONE: u32 = u32::MAX;
 
-    pub fn new(
-        a: u32,
-        b: Option<u32>,
-        product_a: Option<u32>,
-        product_b: Option<u32>,
-        catalyst: Option<u32>,
-        kinetic_model: u32,
-        rate: f32,
-        km_reactant_a: f32,
-        km_reactant_b: f32,
-        enthalpy: f32,
-        entropy: f32,
-    ) -> Self {
+    pub fn new(config: GpuReactionRuleConfig) -> Self {
         Self {
-            reactant_a_index: a,
-            reactant_b_index: b.unwrap_or(Self::NONE),
-            product_a_index: product_a.unwrap_or(Self::NONE),
-            product_b_index: product_b.unwrap_or(Self::NONE),
-            catalyst_index: catalyst.unwrap_or(Self::NONE),
-            kinetic_model,
-            effective_rate_bits: rate.to_bits(),
-            km_reactant_a_bits: km_reactant_a.to_bits(),
-            km_reactant_b_bits: km_reactant_b.to_bits(),
-            enthalpy_delta_bits: enthalpy.to_bits(),
-            entropy_delta_bits: entropy.to_bits(),
+            reactant_a_index: config.reactant_a_index,
+            reactant_b_index: config.reactant_b_index.unwrap_or(Self::NONE),
+            product_a_index: config.product_a_index.unwrap_or(Self::NONE),
+            product_b_index: config.product_b_index.unwrap_or(Self::NONE),
+            catalyst_index: config.catalyst_index.unwrap_or(Self::NONE),
+            kinetic_model: config.kinetic_model,
+            effective_rate_bits: config.rate.to_bits(),
+            km_reactant_a_bits: config.km_reactant_a.to_bits(),
+            km_reactant_b_bits: config.km_reactant_b.to_bits(),
+            enthalpy_delta_bits: config.enthalpy.to_bits(),
+            entropy_delta_bits: config.entropy.to_bits(),
         }
     }
 }
@@ -479,56 +502,16 @@ impl GpuSimulation {
     ///
     /// This creates a Vulkan instance and device suitable for compute-only
     /// workloads.
-    pub fn new(
-        width: u32,
-        height: u32,
-        species_count: usize,
-        initial_concentrations: &[Vec<f32>],
-        solid_mask_data: &[u32],
-        material_ids_data: &[u32],
-        diffusion_coeffs_data: &[f32],
-        species_charges_data: &[i32],
-    ) -> Result<Self> {
+    pub fn new(config: GpuSimulationCreateInfo<'_>) -> Result<Self> {
         let (entry, context) = Self::create_owned_context()?;
-        Self::new_from_context(
-            Some(entry),
-            context,
-            true,
-            width,
-            height,
-            species_count,
-            initial_concentrations,
-            solid_mask_data,
-            material_ids_data,
-            diffusion_coeffs_data,
-            species_charges_data,
-        )
+        Self::new_from_context(Some(entry), context, true, config)
     }
 
     pub fn new_with_shared_context(
         context: SharedGpuContext,
-        width: u32,
-        height: u32,
-        species_count: usize,
-        initial_concentrations: &[Vec<f32>],
-        solid_mask_data: &[u32],
-        material_ids_data: &[u32],
-        diffusion_coeffs_data: &[f32],
-        species_charges_data: &[i32],
+        config: GpuSimulationCreateInfo<'_>,
     ) -> Result<Self> {
-        Self::new_from_context(
-            None,
-            context,
-            false,
-            width,
-            height,
-            species_count,
-            initial_concentrations,
-            solid_mask_data,
-            material_ids_data,
-            diffusion_coeffs_data,
-            species_charges_data,
-        )
+        Self::new_from_context(None, context, false, config)
     }
 
     fn create_owned_context() -> Result<(ash::Entry, SharedGpuContext)> {
@@ -622,15 +605,18 @@ impl GpuSimulation {
         entry: Option<ash::Entry>,
         context: SharedGpuContext,
         owns_vulkan_context: bool,
-        width: u32,
-        height: u32,
-        species_count: usize,
-        initial_concentrations: &[Vec<f32>],
-        solid_mask_data: &[u32],
-        material_ids_data: &[u32],
-        diffusion_coeffs_data: &[f32],
-        species_charges_data: &[i32],
+        config: GpuSimulationCreateInfo<'_>,
     ) -> Result<Self> {
+        let GpuSimulationCreateInfo {
+            width,
+            height,
+            species_count,
+            initial_concentrations,
+            solid_mask_data,
+            material_ids_data,
+            diffusion_coeffs_data,
+            species_charges_data,
+        } = config;
         let cell_count = (width * height) as usize;
 
         if initial_concentrations.len() != species_count {
@@ -1132,6 +1118,7 @@ impl GpuSimulation {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn copy_buffer_sync(
         device: &ash::Device,
         command_pool: vk::CommandPool,
@@ -1179,6 +1166,7 @@ impl GpuSimulation {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn readback_buffer_sync(
         device: &ash::Device,
         command_pool: vk::CommandPool,
@@ -1244,6 +1232,7 @@ impl GpuSimulation {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_descriptor_set(
         device: &ash::Device,
         set: vk::DescriptorSet,
@@ -1309,6 +1298,7 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_charge_descriptor_set(
         device: &ash::Device,
         set: vk::DescriptorSet,
@@ -1360,6 +1350,7 @@ impl GpuSimulation {
         conc_current_buffer * 2 + temperature_current_buffer
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_reaction_descriptor_set(
         device: &ash::Device,
         set: vk::DescriptorSet,
@@ -1458,6 +1449,7 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_leak_descriptor_set(
         device: &ash::Device,
         set: vk::DescriptorSet,
@@ -1502,6 +1494,7 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_enzyme_descriptor_set(
         device: &ash::Device,
         set: vk::DescriptorSet,
@@ -1612,7 +1605,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device
                 .cmd_dispatch(cmd, num_groups, self.species_count as u32, 1);
         }
@@ -1645,7 +1638,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 64u32;
-            let num_groups = (push_constants.num_channels + workgroup_size - 1) / workgroup_size;
+            let num_groups = push_constants.num_channels.div_ceil(workgroup_size);
             self.device.cmd_dispatch(cmd, num_groups.max(1), 1, 1);
         }
     }
@@ -1680,7 +1673,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 64u32;
-            let num_groups = (push_constants.num_enzymes + workgroup_size - 1) / workgroup_size;
+            let num_groups = push_constants.num_enzymes.div_ceil(workgroup_size);
             self.device.cmd_dispatch(cmd, num_groups.max(1), 1, 1);
         }
     }
@@ -1714,7 +1707,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device.cmd_dispatch(cmd, num_groups, 1, 1);
         }
     }
@@ -1749,7 +1742,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device.cmd_dispatch(cmd, num_groups, 1, 1);
         }
     }
@@ -1784,21 +1777,20 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device.cmd_dispatch(cmd, num_groups, 1, 1);
         }
     }
 
-    pub fn record_step_frame(
-        &mut self,
-        cmd: vk::CommandBuffer,
-        substeps: u32,
-        substep_dt: f32,
-        diffusion_rate: f32,
-        charge_correction_strength: f32,
-        reaction_dt: f32,
-        thermal_diffusivity: f32,
-    ) {
+    pub fn record_step_frame(&mut self, cmd: vk::CommandBuffer, params: StepFrameParams) {
+        let StepFrameParams {
+            substeps,
+            substep_dt,
+            diffusion_rate,
+            charge_correction_strength,
+            reaction_dt,
+            thermal_diffusivity,
+        } = params;
         if substeps == 0 {
             return;
         }
@@ -1961,47 +1953,41 @@ impl GpuSimulation {
                 );
             }
 
-            if let Some(leak) = self.leak.as_ref() {
-                if leak.active_channel_count > 0 {
-                    let leak_push = LeakPushConstants {
-                        width: self.width,
-                        height: self.height,
-                        species_count: self.species_count as u32,
-                        num_channels: leak.active_channel_count,
-                        dt: substep_dt,
-                        _pad: [0; 3],
-                    };
-                    let leak_descriptor_set = leak.leak_descriptor_sets[self.current_buffer];
-                    self.record_leak_dispatch(cmd, leak, leak_descriptor_set, &leak_push);
-                    self.record_compute_buffer_barrier(
-                        cmd,
-                        self.current_concentration_buffer_handle(),
-                    );
-                }
+            if let Some(leak) = self.leak.as_ref()
+                && leak.active_channel_count > 0
+            {
+                let leak_push = LeakPushConstants {
+                    width: self.width,
+                    height: self.height,
+                    species_count: self.species_count as u32,
+                    num_channels: leak.active_channel_count,
+                    dt: substep_dt,
+                    _pad: [0; 3],
+                };
+                let leak_descriptor_set = leak.leak_descriptor_sets[self.current_buffer];
+                self.record_leak_dispatch(cmd, leak, leak_descriptor_set, &leak_push);
+                self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
             }
 
-            if let Some(enzyme) = self.enzyme.as_ref() {
-                if enzyme.active_enzyme_count > 0 {
-                    let enzyme_push = EnzymePushConstants {
-                        width: self.width,
-                        height: self.height,
-                        species_count: self.species_count as u32,
-                        num_enzymes: enzyme.active_enzyme_count,
-                        dt: reaction_substep_dt,
-                        base_turnover_rate: 0.22,
-                        _pad: [0; 2],
-                    };
-                    let enzyme_descriptor_set = enzyme.enzyme_descriptor_sets
-                        [Self::reaction_descriptor_index(
-                            self.current_buffer,
-                            temperature_current_buffer,
-                        )];
-                    self.record_enzyme_dispatch(cmd, enzyme, enzyme_descriptor_set, &enzyme_push);
-                    self.record_compute_buffer_barrier(
-                        cmd,
-                        self.current_concentration_buffer_handle(),
-                    );
-                }
+            if let Some(enzyme) = self.enzyme.as_ref()
+                && enzyme.active_enzyme_count > 0
+            {
+                let enzyme_push = EnzymePushConstants {
+                    width: self.width,
+                    height: self.height,
+                    species_count: self.species_count as u32,
+                    num_enzymes: enzyme.active_enzyme_count,
+                    dt: reaction_substep_dt,
+                    base_turnover_rate: 0.22,
+                    _pad: [0; 2],
+                };
+                let enzyme_descriptor_set = enzyme.enzyme_descriptor_sets
+                    [Self::reaction_descriptor_index(
+                        self.current_buffer,
+                        temperature_current_buffer,
+                    )];
+                self.record_enzyme_dispatch(cmd, enzyme, enzyme_descriptor_set, &enzyme_push);
+                self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
             }
         }
 
@@ -2038,12 +2024,14 @@ impl GpuSimulation {
 
         self.record_step_frame(
             self.command_buffer,
-            substeps,
-            substep_dt,
-            diffusion_rate,
-            charge_correction_strength,
-            reaction_dt,
-            thermal_diffusivity,
+            StepFrameParams {
+                substeps,
+                substep_dt,
+                diffusion_rate,
+                charge_correction_strength,
+                reaction_dt,
+                thermal_diffusivity,
+            },
         );
 
         unsafe {
@@ -2110,7 +2098,7 @@ impl GpuSimulation {
 
             // Dispatch: one thread per cell, process all species
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device.cmd_dispatch(
                 self.command_buffer,
                 num_groups,
@@ -2216,7 +2204,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device
                 .cmd_dispatch(self.command_buffer, num_groups, 1, 1);
 
@@ -2756,35 +2744,42 @@ impl GpuSimulation {
             rule_set_hash: 0,
         });
 
-        self.coarse_grid = CoarseGrid::new(
-            self.device.clone(),
-            self.compute_queue,
-            self.compute_queue_family,
-            self.allocator
+        self.coarse_grid = CoarseGrid::new(CoarseGridCreateInfo {
+            device: self.device.clone(),
+            queue: self.compute_queue,
+            queue_family: self.compute_queue_family,
+            allocator: self
+                .allocator
                 .as_ref()
                 .expect("allocator should exist")
                 .clone(),
-            self.width,
-            self.height,
-            self.species_count,
-            8,
-            self.conc_buffer_a.buffer,
-            self.conc_buffer_b.buffer,
-            self.reaction
-                .as_ref()
-                .expect("reaction initialized")
-                .temperature_buffer_a
-                .buffer,
-            self.reaction
-                .as_ref()
-                .expect("reaction initialized")
-                .temperature_buffer_b
-                .buffer,
-            self.solid_mask.buffer,
-            (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64,
-            (self.cell_count * std::mem::size_of::<f32>()) as u64,
-            (self.cell_count * std::mem::size_of::<u32>()) as u64,
-        )
+            full_width: self.width,
+            full_height: self.height,
+            species_count: self.species_count,
+            mip_factor: 8,
+            source_buffers: CoarseGridSourceBuffers {
+                src_buffer_a: self.conc_buffer_a.buffer,
+                src_buffer_b: self.conc_buffer_b.buffer,
+                temperature_buffer_a: self
+                    .reaction
+                    .as_ref()
+                    .expect("reaction initialized")
+                    .temperature_buffer_a
+                    .buffer,
+                temperature_buffer_b: self
+                    .reaction
+                    .as_ref()
+                    .expect("reaction initialized")
+                    .temperature_buffer_b
+                    .buffer,
+                solid_mask_buffer: self.solid_mask.buffer,
+                conc_buffer_size: (self.species_count
+                    * self.cell_count
+                    * std::mem::size_of::<f32>()) as u64,
+                temperature_buffer_size: (self.cell_count * std::mem::size_of::<f32>()) as u64,
+                mask_buffer_size: (self.cell_count * std::mem::size_of::<u32>()) as u64,
+            },
+        })
         .ok();
 
         log::info!("Reaction pipeline initialized");
@@ -2832,7 +2827,7 @@ impl GpuSimulation {
             return Ok(false); // Same rules, skip upload
         }
 
-        let rules_size = (rules.len() * std::mem::size_of::<GpuReactionRule>()) as u64;
+        let rules_size = std::mem::size_of_val(rules) as u64;
         if rules_size > 0 {
             self.staging_buffer.write(rules)?;
             Self::copy_buffer_sync(
@@ -2915,7 +2910,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device
                 .cmd_dispatch(self.command_buffer, num_groups, 1, 1);
 
@@ -3415,7 +3410,7 @@ impl GpuSimulation {
             );
 
             let workgroup_size = 256u32;
-            let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
+            let num_groups = (self.cell_count as u32).div_ceil(workgroup_size);
             self.device
                 .cmd_dispatch(self.command_buffer, num_groups, 1, 1);
 
