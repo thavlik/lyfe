@@ -217,6 +217,7 @@ cargo test -p fluidsim
 - The simulation is intentionally split into a fast fine-grid transport loop and a slower semantic reasoning loop.
 - The demo is Linux-focused today and assumes working Vulkan presentation support.
 - Capturing with OBS might not work properly due to use of low-level Vulkan presentation.
+- Chemical species are currently represented with molecular formulae. Plans are in motion to represent species as full structural formulae.
 
 ## License
 
