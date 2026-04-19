@@ -1,4 +1,6 @@
 # Lyfe
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-0366d6)](https://github.com/thavlik/lyfe#license)
+[![Status: Actively Maintained](https://img.shields.io/badge/status-actively%20maintained-2ea44f)](https://github.com/thavlik/lyfe/pulse)
 
 Lyfe is a GPU-accelerated 2D chemical transport sandbox written in Rust on top of Vulkan. The project currently includes a Lean-backed reaction layer, coarse semantic snapshots, thermal transport, membrane leak channels, and moving enzyme entities. It represents "pre-production R&D" for a video game.
 
