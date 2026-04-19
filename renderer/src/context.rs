@@ -11,6 +11,40 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, Raw
 use std::sync::Arc;
 use winit::window::Window;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentModePreference {
+    Auto,
+    Fifo,
+    Mailbox,
+}
+
+impl PresentModePreference {
+    fn select(
+        self,
+        display_handle: RawDisplayHandle,
+        present_modes: &[vk::PresentModeKHR],
+    ) -> vk::PresentModeKHR {
+        match self {
+            Self::Fifo => vk::PresentModeKHR::FIFO,
+            Self::Mailbox => {
+                if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+                    vk::PresentModeKHR::MAILBOX
+                } else {
+                    vk::PresentModeKHR::FIFO
+                }
+            }
+            Self::Auto => match display_handle {
+                // OBS/PipeWire capture on X11 is more reliable with compositor-friendly FIFO.
+                RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_) => vk::PresentModeKHR::FIFO,
+                _ if present_modes.contains(&vk::PresentModeKHR::MAILBOX) => {
+                    vk::PresentModeKHR::MAILBOX
+                }
+                _ => vk::PresentModeKHR::FIFO,
+            },
+        }
+    }
+}
+
 /// Vulkan rendering context with swapchain.
 pub struct RenderContext {
     pub entry: ash::Entry,
@@ -29,7 +63,9 @@ pub struct RenderContext {
     pub swapchain_images: Vec<vk::Image>,
     pub swapchain_image_views: Vec<vk::ImageView>,
     pub swapchain_format: vk::Format,
+    pub swapchain_color_space: vk::ColorSpaceKHR,
     pub swapchain_extent: vk::Extent2D,
+    pub present_mode: vk::PresentModeKHR,
 
     // Render pass
     pub render_pass: vk::RenderPass,
@@ -48,7 +84,7 @@ pub struct RenderContext {
 }
 
 impl RenderContext {
-    pub fn new(window: &Window) -> Result<Self> {
+    pub fn new(window: &Window, present_mode_preference: PresentModePreference) -> Result<Self> {
         let entry = unsafe { ash::Entry::load()? };
 
         // Create instance with surface extensions
@@ -66,7 +102,8 @@ impl RenderContext {
         let mut extensions = vec![ash::khr::surface::NAME.as_ptr()];
         
         let display_handle = window.display_handle().map_err(|e| anyhow::anyhow!("{}", e))?;
-        match display_handle.as_raw() {
+        let raw_display_handle = display_handle.as_raw();
+        match raw_display_handle {
             RawDisplayHandle::Xlib(_) => {
                 extensions.push(ash::khr::xlib_surface::NAME.as_ptr());
             }
@@ -169,11 +206,7 @@ impl RenderContext {
             .clone();
 
         // Choose present mode (prefer mailbox for low latency)
-        let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-            vk::PresentModeKHR::MAILBOX
-        } else {
-            vk::PresentModeKHR::FIFO
-        };
+        let present_mode = present_mode_preference.select(raw_display_handle, &present_modes);
 
         // Choose extent
         let extent = if surface_caps.current_extent.width != u32::MAX {
@@ -322,7 +355,9 @@ impl RenderContext {
             swapchain_images,
             swapchain_image_views,
             swapchain_format: format.format,
+            swapchain_color_space: format.color_space,
             swapchain_extent: extent,
+            present_mode,
             render_pass,
             framebuffers,
             command_pool,
@@ -366,14 +401,14 @@ impl RenderContext {
             .surface(self.surface)
             .min_image_count(image_count)
             .image_format(self.swapchain_format)
-            .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+            .image_color_space(self.swapchain_color_space)
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(surface_caps.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(self.present_mode)
             .clipped(true)
             .old_swapchain(old_swapchain);
 

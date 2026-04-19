@@ -16,6 +16,6 @@ pub mod context;
 pub mod pipeline;
 pub mod egui_integration;
 
-pub use context::RenderContext;
-pub use pipeline::RenderPipeline;
+pub use context::{PresentModePreference, RenderContext};
+pub use pipeline::{RenderPipeline, RenderViewport};
 pub use egui_integration::EguiRenderer;

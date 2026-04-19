@@ -10,6 +10,25 @@ use gpu_allocator::MemoryLocation;
 
 use crate::context::RenderContext;
 
+#[derive(Debug, Clone, Copy)]
+pub struct RenderViewport {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl RenderViewport {
+    pub fn fullscreen(extent: vk::Extent2D) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: extent.width,
+            height: extent.height,
+        }
+    }
+}
+
 /// Push constants for the visualization shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -542,7 +561,14 @@ impl RenderPipeline {
     }
 
     /// Record rendering commands.
-    pub fn record(&mut self, ctx: &RenderContext, cmd: vk::CommandBuffer, image_index: usize, thermal_view: bool) {
+    pub fn record(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: vk::CommandBuffer,
+        image_index: usize,
+        thermal_view: bool,
+        viewport: RenderViewport,
+    ) {
         // Increment frame counter
         self.frame_counter = self.frame_counter.wrapping_add(1);
         
@@ -563,17 +589,23 @@ impl RenderPipeline {
             })
             .clear_values(&clear_values);
 
-        let viewport = vk::Viewport::default()
-            .x(0.0)
-            .y(0.0)
-            .width(ctx.swapchain_extent.width as f32)
-            .height(ctx.swapchain_extent.height as f32)
+        let viewport_state = vk::Viewport::default()
+            .x(viewport.x as f32)
+            .y(viewport.y as f32)
+            .width(viewport.width.max(1) as f32)
+            .height(viewport.height.max(1) as f32)
             .min_depth(0.0)
             .max_depth(1.0);
 
         let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D { x: 0, y: 0 })
-            .extent(ctx.swapchain_extent);
+            .offset(vk::Offset2D {
+                x: viewport.x.min(i32::MAX as u32) as i32,
+                y: viewport.y.min(i32::MAX as u32) as i32,
+            })
+            .extent(vk::Extent2D {
+                width: viewport.width.max(1),
+                height: viewport.height.max(1),
+            });
 
         let push_constants = VisualizationPushConstants {
             width: self.grid_width,
@@ -586,7 +618,7 @@ impl RenderPipeline {
         unsafe {
             ctx.device.cmd_begin_render_pass(cmd, &render_pass_info, vk::SubpassContents::INLINE);
             ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            ctx.device.cmd_set_viewport(cmd, 0, &[viewport]);
+            ctx.device.cmd_set_viewport(cmd, 0, &[viewport_state]);
             ctx.device.cmd_set_scissor(cmd, 0, &[scissor]);
             ctx.device.cmd_bind_descriptor_sets(
                 cmd,

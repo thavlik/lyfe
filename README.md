@@ -1,148 +1,220 @@
-# Fluid Simulation Demo
+# Lyfe
 
-A high-performance GPU-accelerated 2D fluid simulation with species mixing, implemented in Rust using Vulkan compute shaders.
+Lyfe is a GPU-accelerated 2D chemical transport sandbox written in Rust on top of Vulkan. The project currently includes a Lean-backed reaction layer, coarse semantic snapshots, thermal transport, membrane leak channels, and moving enzyme entities. It represents "pre-production R&D" for a video game.
 
-## Architecture
+At a high level:
 
-### Workspace Structure
+- `fluidsim` runs the fine-grid simulation on the GPU.
+- `kinetics` builds coarse semantic snapshots and invokes Lean for low-frequency rule evaluation.
+- `lean` contains the `lyfe-rules` executable that decides which reactions are active.
+- `renderer` visualizes concentrations and temperature.
+- `demo` ties everything together into an interactive desktop application.
 
-- **fluidsim**: Core simulation library
-  - Species registry and ID interning  
-  - Grid representation
-  - Solid geometry handling
-  - GPU compute pipeline for diffusion
-  - Inspection/aggregation APIs
-  
-- **renderer**: Vulkan rendering library
-  - Swapchain management
-  - Visualization pipeline  
-  - egui integration for tooltips
+## Screenshots
 
-- **demo**: Main executable
-  - Window creation and event loop
-  - Simulation/render coordination
-  - Mouse inspection handling
+<img width="200" src="images/screenshot_0_enzymes.webp">
+<img width="200" src="images/screenshot_1_leak_channels.webp">
 
-## Data Model
+## Current Feature Set
 
-### Species System
+### Fine-grid GPU simulation
 
-Species are identified by string names (e.g., `"Na+"`, `"Cl-"`) and internally interned to stable numeric IDs for GPU efficiency:
+- Multi-species transport on a dense `[species][cell]` buffer layout.
+- Explicit diffusion on Vulkan compute shaders with ping-pong buffers.
+- Solid geometry and material masks for impermeable walls and embedded structures.
+- Per-cell temperature field with a separate thermal diffusion pass.
+- Optional charge-correction / electrochemical transport heuristics for ionic systems.
+- Shared render/simulation Vulkan context so rendering can bind live simulation buffers directly.
 
-- **External API**: Uses `HashMap<SpeciesId, f64>` for conceptual cell-level access
-- **Internal Storage**: Dense `[species][cell]` buffer layout where:
-  - `species_index` is the outer dimension (one slice per species)
-  - `cell_index = y * width + x` is the inner dimension (row-major grid)
+### Lean-backed kinetics and semantics
 
-This layout optimizes for per-species diffusion passes where each compute shader invocation processes one species channel.
+- `fluidsim` builds a coarse semantic snapshot once per simulated second.
+- `kinetics` serializes that snapshot to JSON and sends it to Lean (`lyfe-rules`)
+- Lean returns compact reaction directives instead of replacing the simulation state.
+- The returned directives can carry:
+  - Mass-action or Michaelis-Menten kinetics.
+  - Tile-local applicability.
+  - Thermodynamic metadata such as $\Delta H$, $\Delta G$, $\Delta S$, and activation energy.
+- The GPU reaction pass consumes those directives and updates concentration and temperature fields in-place.
 
-### Buffer Layout
+### Chemistry currently implemented
 
-```
-Concentration buffer: [species_count][cell_count] of f32
-  - Total size: species_count * width * height * 4 bytes
-  - Access: buffer[species_index * cell_count + cell_index]
+- Strong acid/base neutralization: $\mathrm{H^+ + OH^- \rightarrow H_2O}$.
+- Weak-acid buffer behavior for acetic acid / acetate systems.
+- Direct neutralization of acetic acid by hydroxide.
+- Catalyst-gated phosphorylation rule for hexokinase.
+- Michaelis-Menten support for catalyst-driven reactions.
 
-Solid mask: [cell_count] of u32
-  - 0 = fluid cell, 1 = solid cell
+### Membranes, leaks, and enzymes
 
-Material IDs: [cell_count] of u32
-  - 0 = none (fluid), >0 = material index
-```
+- Leak channels embedded in solid boundaries for directional transport experiments.
+- Electrochemical leak heuristics that preserve directional flow while damping unstable local charge separation.
+- Moving enzyme entities with drift, rotation, and thermal/circulation heuristics.
+- Enzyme-specific GPU pass for entity-mediated catalysis separate from dissolved catalyst rules.
 
-### Grid Coordinates
+### Inspection and debugging
 
-- 2D uniform grid where each cell is 1x1 logical units
-- Coordinates: (x, y) with x increasing rightward, y increasing downward
-- Linear index: `cell_index = y * width + x`
+- Async coarse inspection readback for hover tooltips.
+- Detail mode with pinned probe callouts around the simulation viewport.
+- Thermal visualization overlay.
+- Performance overlay for frame-time monitoring.
+- Smoke-test mode that renders a few frames and exits.
 
-## Simulation Loop
+## Workspace Layout
 
-Each simulation step:
+- `fluidsim`: core simulation crate.
+  - GPU transport, reaction, leak, enzyme, and thermal compute passes.
+  - Scenario builders and coarse semantic snapshot generation.
+  - Inspection, material, and species registries.
+- `kinetics`: low-frequency semantic evaluation crate.
+  - Snapshot/update types.
+  - Lean bridge and evaluator.
+  - Rule-engine configuration and diagnostics.
+- `lean`: Lean 4 rule engine.
+  - Owns the semantic rule definitions.
+- `renderer`: Vulkan rendering and egui overlay crate.
+- `demo`: interactive application and scenario runner.
 
-1. **Diffusion Pass** (GPU compute)
-   - For each species channel, diffuse concentrations between adjacent fluid cells
-   - Zero flux at solid boundaries (no transfer into/out of solid cells)
-   - Uses ping-pong buffers to avoid read-write hazards
-   
-2. **Chemistry Evolution** (stub)
-   - Hook for future reaction chemistry
-   - Currently a no-op that preserves concentrations
+## Simulation Flow
 
-### Diffusion Algorithm
+Each frame, the demo advances the fine-grid simulation on the GPU and renders the current concentration or temperature field. On a slower cadence, the simulation also performs a semantic pass:
 
-The GPU compute shader implements explicit Euler diffusion:
+1. Build a coarse snapshot from the current grid.
+2. Send that snapshot to Lean through the `kinetics` crate.
+3. Receive reaction directives for the tiles where rules are active.
+4. Upload those directives back to the GPU.
+5. Continue the fine-grid simulation with updated kinetics parameters.
 
-```glsl
-new_c[i] = c[i] + D * dt * sum(c[neighbor] - c[i]) for each fluid neighbor
-```
+This split keeps high-frequency transport on the GPU while moving rule selection and reaction semantics into Lean.
 
-- 4-connected neighbors (left, right, top, bottom)
-- Solid cells block diffusion (zero flux boundary)
-- Concentrations clamped to prevent negative values
+## Scenarios
 
-## Inspection System
+The demo currently ships with six scenarios:
 
-Mouse hover inspection aggregates over coarse cells:
-
-- Default mip factor: 8 (each inspected region covers 8x8 fine cells)
-- Aggregation: Average species concentrations across covered fluid cells
-- Display: Sorted by concentration (highest first), filtered by epsilon threshold
-
-### Inspection Result
-
-```rust
-InspectionResult {
-    coord: CoarseCellCoord,      // Which coarse cell was inspected
-    content: RegionContent,       // Fluid, Solid, or Mixed
-    species: Vec<SpeciesEntry>,   // Species concentrations
-    materials: Vec<MaterialEntry>, // Materials present (if solid)
-    fluid_cell_count: u32,
-    solid_cell_count: u32,
-}
-```
-
-## Demo Scenario
-
-The demo initializes:
-
-- **Grid**: 512x512 fine cells
-- **Solid geometry**: Hollow titanium square (wall thickness = 4 cells) centered in grid
-- **Interior**:
-  - Left half: 0.1 M NaCl → Na+ = 0.1, Cl- = 0.1
-  - Right half: 0.2 M KCl → K+ = 0.2, Cl- = 0.2
-- **Exterior**:
-  - Left half: 1.0 M NaOH → Na+ = 1.0, OH- = 1.0
-  - Right half: 1.0 M HCl → H+ = 1.0, Cl- = 1.0
-
-Over time:
-- Interior species homogenize to a uniform mixture
-- Exterior species homogenize to a uniform mixture
-- Interior and exterior remain isolated by the titanium wall
-
-## Controls
-
-- **Mouse hover**: Inspect coarse cell under cursor
-- **Space**: Toggle pause
-- **+/-**: Adjust inspection mip factor
-- **Escape**: Exit
-
-## Performance Notes
-
-- All simulation runs on GPU compute shaders
-- Minimal CPU-GPU synchronization (only for inspection readback)
-- Persistent GPU buffers with ping-pong for diffusion
-- Struct-of-arrays layout for cache-friendly GPU access
-- Dense indexing (no hash maps in hot path)
+- `basic`: the original Na/K/Cl transport demo inside a hollow titanium box with a temperature split.
+- `acid-base`: strong acid / strong base mixing with exothermic neutralization.
+- `buffers`: weak-acid buffer against NaOH, including acetate/acetic-acid equilibrium.
+- `catalyst`: dissolved hexokinase driving glucose phosphorylation.
+- `enzyme`: moving enzyme entities performing the same phosphorylation chemistry as localized actors.
+- `leak`: buffered ionic system with membrane leak channels for K+ and Na+ transport.
 
 ## Building
 
+### Requirements
+
+- Rust 2024 edition toolchain.
+- Vulkan 1.2-capable GPU and working Vulkan driver.
+- Lean 4 and Lake.
+- Linux desktop environment with X11 or Wayland (other platforms may work but are untested).
+
+### Build the Lean rule engine
+
+The simulation initializes the kinetics layer by default, so the Lean executable should be built before running the demo:
+
+```bash
+cd lean
+lake build
+cd ..
+```
+
+By default, the Rust side looks for the binary in one of these locations:
+
+- `LYFE_LEAN_BINARY`
+- `lean/.lake/build/bin/lyfe-rules`
+- `../lean/.lake/build/bin/lyfe-rules`
+- `lyfe-rules` on `PATH`
+
+If you build the Lean binary somewhere else:
+
+```bash
+export LYFE_LEAN_BINARY=/absolute/path/to/lyfe-rules
+```
+
+### Build the Rust workspace
+
 ```bash
 cargo build --release
+```
+
+## Running The Demo
+
+Show CLI help:
+
+```bash
+cargo run -p demo -- --help
+```
+
+Run the default scenario:
+
+```bash
 cargo run --release -p demo
 ```
 
-Requires:
-- Rust 2024 edition
-- Vulkan 1.2 capable GPU
-- Linux with X11 or Wayland (currently)
+Run a specific scenario:
+
+```bash
+cargo run --release -p demo -- acid-base
+cargo run --release -p demo -- buffers
+cargo run --release -p demo -- catalyst
+cargo run --release -p demo -- enzyme
+cargo run --release -p demo -- leak
+```
+
+Useful flags:
+
+- `--detail`: render the sim as an inset with pinned inspection probes.
+- `--smoke-test`: render 5 frames and exit.
+- `--present-mode auto|fifo|mailbox`: choose Vulkan present mode. `auto` prefers `fifo` on X11 for capture compatibility.
+
+Examples:
+
+```bash
+cargo run --release -p demo -- --detail leak
+cargo run --release -p demo -- --smoke-test basic
+cargo run --release -p demo -- --present-mode fifo enzyme
+```
+
+## Controls
+
+General controls:
+
+- Mouse hover: inspect the coarse cell under the cursor.
+- `Space`: pause or resume the simulation.
+- `+` / `-`: increase or decrease the inspection mip factor.
+- Hold `T`: show the thermal view.
+- `Tab`: toggle the performance overlay.
+- `Shift+R`: reset the current scenario.
+- `Escape`: quit.
+
+Leak editor controls:
+
+- Use the egui `CREATE` panel to add leak channels.
+- Left click selects a leak channel or confirms placement/transform.
+- `R`: rotate a leak channel by 45 degrees while placing or transforming it.
+- With a leak channel selected, `T` enters transform mode.
+- `Delete`: remove the selected leak channel.
+
+## Tests And Probes
+
+The `fluidsim` crate includes probe binaries and regression tests for the newer chemistry and transport paths:
+
+- `acid_base_probe`: checks center-window neutralization and exothermic heating.
+- `buffer_probe`: checks weak-acid / hydroxide consumption and acetate formation.
+- `leak_probe`: checks K+ inward flow, Na+ outward flow, mass conservation, and bounded local charge error.
+
+Run them with:
+
+```bash
+cargo test -p fluidsim
+```
+
+## Notes
+
+- The Lean layer is the source of truth for active semantic rules. Adding new rule families is intended to happen in Lean first, with Rust remaining mostly rule-agnostic.
+- The simulation is intentionally split into a fast fine-grid transport loop and a slower semantic reasoning loop.
+- The demo is Linux-focused today and assumes working Vulkan presentation support.
+- Capturing with OBS might not work properly due to use of low-level Vulkan presentation.
+
+## License
+
+All of the code in this repository is released under Apache 2.0 / MIT dual-license.

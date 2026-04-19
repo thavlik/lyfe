@@ -10,12 +10,13 @@
 //! - Escape: Exit
 
 use std::collections::VecDeque;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fluidsim::{Simulation, SimulationConfig};
-use renderer::{RenderContext, RenderPipeline, EguiRenderer};
+use renderer::{EguiRenderer, PresentModePreference, RenderContext, RenderPipeline, RenderViewport};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -29,6 +30,94 @@ const PERFORMANCE_WINDOW: Duration = Duration::from_secs(30);
 const TOOLTIP_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const ENTITY_EDIT_DEBOUNCE: Duration = Duration::from_millis(500);
 const DEFAULT_EDITOR_LEAK_RATE: f32 = 4.5;
+const DETAIL_MARGIN_MIN: f32 = 108.0;
+const DETAIL_MARGIN_MAX: f32 = 220.0;
+const DETAIL_PANEL_WIDTH: f32 = 250.0;
+
+#[derive(Debug, Clone, Copy)]
+struct ScenarioBoxBounds {
+    outer_x0: u32,
+    outer_x1: u32,
+    inner_x0: u32,
+    inner_y0: u32,
+    inner_x1: u32,
+    inner_y1: u32,
+}
+
+impl ScenarioBoxBounds {
+    fn from_dimensions(width: u32, height: u32) -> Self {
+        let wall_thickness = 4u32;
+        let inner_size = (width.min(height) / 2).max(64);
+        let outer_size = inner_size + 2 * wall_thickness;
+
+        let center_x = width / 2;
+        let center_y = height / 2;
+
+        let outer_x0 = center_x - outer_size / 2;
+        let outer_y0 = center_y - outer_size / 2;
+        let outer_x1 = outer_x0 + outer_size;
+        let outer_y1 = outer_y0 + outer_size;
+
+        Self {
+            outer_x0,
+            outer_x1,
+            inner_x0: outer_x0 + wall_thickness,
+            inner_y0: outer_y0 + wall_thickness,
+            inner_x1: outer_x1 - wall_thickness,
+            inner_y1: outer_y1 - wall_thickness,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimulationViewport {
+    rect: egui::Rect,
+    physical_x: u32,
+    physical_y: u32,
+    physical_width: u32,
+    physical_height: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DetailPanelSlot {
+    TopRight,
+    BottomLeft,
+    TopCenter,
+    LeftCenter,
+    RightCenter,
+}
+
+impl DetailPanelSlot {
+    fn anchor(self) -> egui::Align2 {
+        match self {
+            Self::TopRight => egui::Align2::RIGHT_TOP,
+            Self::BottomLeft => egui::Align2::LEFT_BOTTOM,
+            Self::TopCenter => egui::Align2::CENTER_TOP,
+            Self::LeftCenter => egui::Align2::LEFT_CENTER,
+            Self::RightCenter => egui::Align2::RIGHT_CENTER,
+        }
+    }
+
+    fn offset(self) -> egui::Vec2 {
+        match self {
+            Self::TopRight => egui::vec2(-18.0, 18.0),
+            Self::BottomLeft => egui::vec2(18.0, -18.0),
+            Self::TopCenter => egui::vec2(0.0, 18.0),
+            Self::LeftCenter => egui::vec2(18.0, 110.0),
+            Self::RightCenter => egui::vec2(-18.0, 0.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DetailProbeSnapshot {
+    title: &'static str,
+    slot: DetailPanelSlot,
+    sample_grid: (f32, f32),
+    coarse_coord: (u32, u32),
+    mip: u32,
+    tooltip_text: String,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct PerformanceSample {
@@ -154,12 +243,53 @@ enum ScenarioKind {
     Leak,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+enum PresentModeCli {
+    #[default]
+    Auto,
+    Fifo,
+    Mailbox,
+}
+
+impl FromStr for PresentModeCli {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "fifo" | "vsync" => Ok(Self::Fifo),
+            "mailbox" | "low-latency" | "low_latency" => Ok(Self::Mailbox),
+            _ => Err(format!(
+                "unsupported present mode '{value}' (expected: auto, fifo, mailbox)"
+            )),
+        }
+    }
+}
+
+impl From<PresentModeCli> for PresentModePreference {
+    fn from(value: PresentModeCli) -> Self {
+        match value {
+            PresentModeCli::Auto => Self::Auto,
+            PresentModeCli::Fifo => Self::Fifo,
+            PresentModeCli::Mailbox => Self::Mailbox,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "lyfe-demo", about = "Fluid simulation demo")]
 struct Cli {
     /// Run in smoke-test mode (render 5 frames then exit)
     #[arg(long)]
     smoke_test: bool,
+
+    /// Render the simulation inset with pinned inspection callouts in the margin
+    #[arg(long)]
+    detail: bool,
+
+    /// Vulkan present mode. auto prefers FIFO on X11 for capture compatibility.
+    #[arg(long, default_value = "auto")]
+    present_mode: PresentModeCli,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -217,6 +347,10 @@ struct DemoApp {
     fps_update_time: Instant,
     current_fps: f64,
     performance_samples: VecDeque<PerformanceSample>,
+    detail_view: bool,
+    detail_probes: Vec<DetailProbeSnapshot>,
+    detail_last_refresh: Instant,
+    present_mode: PresentModePreference,
     
     // Flags
     needs_resize: bool,
@@ -225,7 +359,12 @@ struct DemoApp {
 }
 
 impl DemoApp {
-    fn new(smoke_test: bool, scenario: ScenarioKind) -> Self {
+    fn new(
+        smoke_test: bool,
+        scenario: ScenarioKind,
+        detail_view: bool,
+        present_mode: PresentModePreference,
+    ) -> Self {
         Self {
             window: None,
             render_ctx: None,
@@ -255,6 +394,10 @@ impl DemoApp {
             fps_update_time: Instant::now(),
             current_fps: 0.0,
             performance_samples: VecDeque::new(),
+            detail_view,
+            detail_probes: Vec::new(),
+            detail_last_refresh: Instant::now() - TOOLTIP_REFRESH_INTERVAL,
+            present_mode,
             needs_resize: false,
             smoke_test,
             scenario,
@@ -265,7 +408,7 @@ impl DemoApp {
         let _size = window.inner_size();
 
         log::info!("Creating render context...");
-        let render_ctx = RenderContext::new(&window)?;
+        let render_ctx = RenderContext::new(&window, self.present_mode)?;
         log::info!("Render context created successfully");
 
         log::info!("Creating simulation on shared Vulkan device...");
@@ -379,29 +522,209 @@ impl DemoApp {
         self.inspector_draft = None;
         self.inspector_dirty = false;
         self.inspector_error = None;
+        self.detail_probes.clear();
+        self.detail_last_refresh = Instant::now() - TOOLTIP_REFRESH_INTERVAL;
         self.last_frame = Instant::now();
 
         log::info!("Simulation reset ({:?} scenario)", self.scenario);
         Ok(())
     }
 
-    fn grid_position_from_mouse(&self) -> Option<(i32, i32)> {
-        let sim = self.simulation.as_ref()?;
+    fn simulation_viewport(&self) -> Option<SimulationViewport> {
         let window = self.window.as_ref()?;
-        let (grid_w, grid_h) = sim.dimensions();
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
+        if scale <= 0.0 {
+            return None;
+        }
+
         let logical_w = size.width as f32 / scale;
         let logical_h = size.height as f32 / scale;
         if logical_w <= 0.0 || logical_h <= 0.0 {
             return None;
         }
 
-        let grid_x = (self.mouse_pos.0 * grid_w as f32 / logical_w).floor() as i32;
-        let grid_y = (self.mouse_pos.1 * grid_h as f32 / logical_h).floor() as i32;
+        let rect = if self.detail_view {
+            let margin = (logical_w.min(logical_h) * 0.14).clamp(DETAIL_MARGIN_MIN, DETAIL_MARGIN_MAX);
+            let side = (logical_w - 2.0 * margin).min(logical_h - 2.0 * margin).max(1.0);
+            egui::Rect::from_center_size(
+                egui::pos2(logical_w * 0.5, logical_h * 0.5),
+                egui::vec2(side, side),
+            )
+        } else {
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(logical_w, logical_h))
+        };
+
+        let physical_x = (rect.left() * scale).round().max(0.0) as u32;
+        let physical_y = (rect.top() * scale).round().max(0.0) as u32;
+        let physical_width = (rect.width() * scale).round().max(1.0) as u32;
+        let physical_height = (rect.height() * scale).round().max(1.0) as u32;
+
+        Some(SimulationViewport {
+            rect,
+            physical_x,
+            physical_y,
+            physical_width: physical_width.min(size.width.saturating_sub(physical_x).max(1)),
+            physical_height: physical_height.min(size.height.saturating_sub(physical_y).max(1)),
+        })
+    }
+
+    fn scenario_box_bounds(&self) -> Option<ScenarioBoxBounds> {
+        let (width, height) = self.simulation.as_ref()?.dimensions();
+        Some(ScenarioBoxBounds::from_dimensions(width, height))
+    }
+
+    fn mouse_grid_position(&self) -> Option<(f32, f32)> {
+        let sim = self.simulation.as_ref()?;
+        let viewport = self.simulation_viewport()?;
+        let pointer = egui::pos2(self.mouse_pos.0, self.mouse_pos.1);
+        if !viewport.rect.contains(pointer) {
+            return None;
+        }
+
+        let (grid_w, grid_h) = sim.dimensions();
+        let grid_x = (pointer.x - viewport.rect.left()) * grid_w as f32 / viewport.rect.width();
+        let grid_y = (pointer.y - viewport.rect.top()) * grid_h as f32 / viewport.rect.height();
         Some((
-            grid_x.clamp(0, grid_w.saturating_sub(1) as i32),
-            grid_y.clamp(0, grid_h.saturating_sub(1) as i32),
+            grid_x.clamp(0.0, grid_w.saturating_sub(1) as f32),
+            grid_y.clamp(0.0, grid_h.saturating_sub(1) as f32),
+        ))
+    }
+
+    fn coarse_rect(&self, coarse_x: u32, coarse_y: u32, mip: u32) -> Option<egui::Rect> {
+        let sim = self.simulation.as_ref()?;
+        let viewport = self.simulation_viewport()?;
+        let (grid_w, grid_h) = sim.dimensions();
+        let cell_w = viewport.rect.width() * mip as f32 / grid_w as f32;
+        let cell_h = viewport.rect.height() * mip as f32 / grid_h as f32;
+        let min_x = viewport.rect.left() + coarse_x as f32 * cell_w;
+        let min_y = viewport.rect.top() + coarse_y as f32 * cell_h;
+        Some(egui::Rect::from_min_size(
+            egui::pos2(min_x, min_y),
+            egui::vec2(cell_w, cell_h),
+        ))
+    }
+
+    fn closest_point_on_rect(rect: egui::Rect, point: egui::Pos2) -> egui::Pos2 {
+        egui::pos2(
+            point.x.clamp(rect.left(), rect.right()),
+            point.y.clamp(rect.top(), rect.bottom()),
+        )
+    }
+
+    fn clamp_grid_sample(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let (grid_w, grid_h) = self.simulation.as_ref()?.dimensions();
+        Some((
+            x.clamp(0.5, grid_w.saturating_sub(1) as f32 - 0.5),
+            y.clamp(0.5, grid_h.saturating_sub(1) as f32 - 0.5),
+        ))
+    }
+
+    fn detail_probe_specs(&self) -> Option<Vec<(&'static str, DetailPanelSlot, (f32, f32))>> {
+        let bounds = self.scenario_box_bounds()?;
+        let inset = (self.inspection_mip as f32 * 1.35).max(12.0);
+        let outside = (self.inspection_mip as f32 * 1.75).max(14.0);
+        let mid_y = (bounds.inner_y0 + bounds.inner_y1) as f32 * 0.5;
+
+        let top_right = self.clamp_grid_sample(bounds.inner_x1 as f32 - inset, bounds.inner_y0 as f32 + inset)?;
+        let bottom_left = self.clamp_grid_sample(bounds.inner_x0 as f32 + inset, bounds.inner_y1 as f32 - inset)?;
+        let center = self.clamp_grid_sample(
+            (bounds.inner_x0 + bounds.inner_x1) as f32 * 0.5,
+            (bounds.inner_y0 + bounds.inner_y1) as f32 * 0.5,
+        )?;
+        let outside_left = self.clamp_grid_sample(bounds.outer_x0 as f32 - outside, mid_y)?;
+        let outside_right = self.clamp_grid_sample(bounds.outer_x1 as f32 + outside, mid_y)?;
+
+        Some(vec![
+            ("Top Right", DetailPanelSlot::TopRight, top_right),
+            ("Bottom Left", DetailPanelSlot::BottomLeft, bottom_left),
+            ("Center", DetailPanelSlot::TopCenter, center),
+            ("Outside Left", DetailPanelSlot::LeftCenter, outside_left),
+            ("Outside Right", DetailPanelSlot::RightCenter, outside_right),
+        ])
+    }
+
+    fn format_detail_probe_tooltip(result: &fluidsim::InspectionResult) -> String {
+        let mut lines = vec![
+            format!("Coarse: ({}, {})", result.coord.x, result.coord.y),
+            format!("Region: {}", result.content),
+            format!("Cells: {} fluid / {} solid", result.fluid_cell_count, result.solid_cell_count),
+            format!(
+                "Temp: {:.2} K ({:.2} C)",
+                result.mean_temperature_kelvin,
+                result.mean_temperature_kelvin - 273.15,
+            ),
+        ];
+
+        if !result.species.is_empty() {
+            lines.push("Species:".to_string());
+            for entry in result.species.iter().take(4) {
+                lines.push(format!("  {:<10} {:>7.3} M", entry.name, entry.concentration));
+            }
+            if result.species.len() > 4 {
+                lines.push(format!("  +{} more", result.species.len() - 4));
+            }
+        }
+
+        if !result.materials.is_empty() {
+            lines.push("Materials:".to_string());
+            for material in result.materials.iter().take(2) {
+                lines.push(format!("  {} {:>5.0}%", material.name, material.fraction * 100.0));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    fn update_detail_probes(&mut self) {
+        if !self.detail_view {
+            self.detail_probes.clear();
+            return;
+        }
+        if !self.detail_probes.is_empty() && self.detail_last_refresh.elapsed() < TOOLTIP_REFRESH_INTERVAL {
+            return;
+        }
+
+        let Some(specs) = self.detail_probe_specs() else {
+            self.detail_probes.clear();
+            return;
+        };
+        let Some(sim) = self.simulation.as_mut() else {
+            self.detail_probes.clear();
+            return;
+        };
+
+        let mut probes = Vec::with_capacity(specs.len());
+        for (title, slot, sample_grid) in specs {
+            match sim.inspect_with_mip(sample_grid.0, sample_grid.1, self.inspection_mip.max(1)) {
+                Ok(result) => probes.push(DetailProbeSnapshot {
+                    title,
+                    slot,
+                    sample_grid,
+                    coarse_coord: (result.coord.x, result.coord.y),
+                    mip: result.coord.mip,
+                    tooltip_text: Self::format_detail_probe_tooltip(&result),
+                }),
+                Err(error) => probes.push(DetailProbeSnapshot {
+                    title,
+                    slot,
+                    sample_grid,
+                    coarse_coord: (0, 0),
+                    mip: self.inspection_mip.max(1),
+                    tooltip_text: format!("Inspection unavailable\n{}", error),
+                }),
+            }
+        }
+
+        self.detail_probes = probes;
+        self.detail_last_refresh = Instant::now();
+    }
+
+    fn grid_position_from_mouse(&self) -> Option<(i32, i32)> {
+        let (grid_x, grid_y) = self.mouse_grid_position()?;
+        Some((
+            grid_x.floor() as i32,
+            grid_y.floor() as i32,
         ))
     }
 
@@ -837,136 +1160,110 @@ impl DemoApp {
     }
 
     fn update_tooltip(&mut self) {
-        let sim = self.simulation.as_mut().unwrap();
-        let (grid_w, grid_h) = sim.dimensions();
-        
-        // Convert mouse position (logical coords) to grid coordinates
-        if let Some(window) = &self.window {
-            let size = window.inner_size();
-            let scale = window.scale_factor() as f32;
-            // mouse_pos is in logical coords, so use logical size
-            let logical_w = size.width as f32 / scale;
-            let logical_h = size.height as f32 / scale;
-            let grid_x = self.mouse_pos.0 * grid_w as f32 / logical_w;
-            let grid_y = self.mouse_pos.1 * grid_h as f32 / logical_h;
-
-            if let Some(channel_index) = sim.hovered_leak_channel(grid_x, grid_y) {
-                self.hovered_leak_channel = Some(channel_index);
-                self.tooltip_text = sim.leak_channel_tooltip(channel_index)
-                    .unwrap_or_else(|| "Leak Channel".to_string());
-                self.show_tooltip = true;
-                return;
-            }
+        let Some((grid_x, grid_y)) = self.mouse_grid_position() else {
             self.hovered_leak_channel = None;
+            self.last_tooltip_coord = None;
+            self.show_tooltip = false;
+            return;
+        };
 
-            let coarse_coord = match (sim.coarse_dimensions(), sim.coarse_mip_factor()) {
-                (Some((coarse_w, coarse_h)), Some(mip)) => {
-                    let coarse_x = ((grid_x.max(0.0) as u32) / mip).min(coarse_w.saturating_sub(1));
-                    let coarse_y = ((grid_y.max(0.0) as u32) / mip).min(coarse_h.saturating_sub(1));
-                    Some((coarse_x, coarse_y))
-                }
-                _ => None,
-            };
-            
-            let cached_data = sim.get_cached_inspection();
-            let cached_matches_hover = cached_data.as_ref().map(|data| data.coord) == coarse_coord;
-            let cached_is_stale = cached_data.as_ref()
-                .map(|data| data.age >= TOOLTIP_REFRESH_INTERVAL)
-                .unwrap_or(true);
-            let hover_changed = coarse_coord != self.last_tooltip_coord;
+        let sim = self.simulation.as_mut().unwrap();
 
-            if !sim.is_inspection_pending() && (hover_changed || !cached_matches_hover || cached_is_stale) {
-                let _ = sim.request_async_inspection(grid_x, grid_y);
+        if let Some(channel_index) = sim.hovered_leak_channel(grid_x, grid_y) {
+            self.hovered_leak_channel = Some(channel_index);
+            self.tooltip_text = sim.leak_channel_tooltip(channel_index)
+                .unwrap_or_else(|| "Leak Channel".to_string());
+            self.show_tooltip = true;
+            return;
+        }
+        self.hovered_leak_channel = None;
+
+        let coarse_coord = match (sim.coarse_dimensions(), sim.coarse_mip_factor()) {
+            (Some((coarse_w, coarse_h)), Some(mip)) => {
+                let coarse_x = ((grid_x.max(0.0) as u32) / mip).min(coarse_w.saturating_sub(1));
+                let coarse_y = ((grid_y.max(0.0) as u32) / mip).min(coarse_h.saturating_sub(1));
+                Some((coarse_x, coarse_y))
             }
-            self.last_tooltip_coord = coarse_coord;
-            
-            // Poll for any completed readbacks
-            if let Some(data) = sim.poll_async_inspection() {
-                // New data available - format it
-                let mut species_rows: Vec<_> = data.concentrations.iter()
-                    .enumerate()
-                    .filter(|&(_, c)| *c > 0.001)
-                    .map(|(i, c)| {
-                        let name = self.species_names.get(i)
-                            .map(|s| s.as_str())
-                            .unwrap_or("?");
-                        (name.to_string(), *c)
-                    })
-                    .collect();
-                species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-                let species_lines: String = species_rows.iter()
-                    .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.tooltip_text = format!(
-                    "Coarse Cell ({}, {})\n\
-                     Fluid: {} / Solid: {}\n\
-                     Temp: {:.2} K ({:.2} C)\n\
-                     Species:\n{}",
-                    data.coord.0, data.coord.1,
-                    data.fluid_count, data.solid_count,
-                    data.mean_temperature_kelvin,
-                    data.mean_temperature_kelvin - 273.15,
-                    species_lines,
-                );
-                self.show_tooltip = true;
-            } else if let Some(data) = cached_data {
-                // Use cached data (may be stale)
-                let mut species_rows: Vec<_> = data.concentrations.iter()
-                    .enumerate()
-                    .filter(|&(_, c)| *c > 0.001)
-                    .map(|(i, c)| {
-                        let name = self.species_names.get(i)
-                            .map(|s| s.as_str())
-                            .unwrap_or("?");
-                        (name.to_string(), *c)
-                    })
-                    .collect();
-                species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-                let species_lines: String = species_rows.iter()
-                    .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.tooltip_text = format!(
-                    "Coarse Cell ({}, {})\n\
-                     Fluid: {} / Solid: {}\n\
-                     Temp: {:.2} K ({:.2} C)\n\
-                     Species:\n{}",
-                    data.coord.0, data.coord.1,
-                    data.fluid_count, data.solid_count,
-                    data.mean_temperature_kelvin,
-                    data.mean_temperature_kelvin - 273.15,
-                    species_lines,
-                );
-                self.show_tooltip = true;
-            } else {
-                // No data yet
-                self.show_tooltip = false;
-            }
+            _ => None,
+        };
+
+        let cached_data = sim.get_cached_inspection();
+        let cached_matches_hover = cached_data.as_ref().map(|data| data.coord) == coarse_coord;
+        let cached_is_stale = cached_data.as_ref()
+            .map(|data| data.age >= TOOLTIP_REFRESH_INTERVAL)
+            .unwrap_or(true);
+        let hover_changed = coarse_coord != self.last_tooltip_coord;
+
+        if !sim.is_inspection_pending() && (hover_changed || !cached_matches_hover || cached_is_stale) {
+            let _ = sim.request_async_inspection(grid_x, grid_y);
+        }
+        self.last_tooltip_coord = coarse_coord;
+
+        if let Some(data) = sim.poll_async_inspection() {
+            let mut species_rows: Vec<_> = data.concentrations.iter()
+                .enumerate()
+                .filter(|&(_, c)| *c > 0.001)
+                .map(|(i, c)| {
+                    let name = self.species_names.get(i)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    (name.to_string(), *c)
+                })
+                .collect();
+            species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let species_lines: String = species_rows.iter()
+                .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.tooltip_text = format!(
+                "Coarse Cell ({}, {})\n\
+                 Fluid: {} / Solid: {}\n\
+                 Temp: {:.2} K ({:.2} C)\n\
+                 Species:\n{}",
+                data.coord.0, data.coord.1,
+                data.fluid_count, data.solid_count,
+                data.mean_temperature_kelvin,
+                data.mean_temperature_kelvin - 273.15,
+                species_lines,
+            );
+            self.show_tooltip = true;
+        } else if let Some(data) = cached_data {
+            let mut species_rows: Vec<_> = data.concentrations.iter()
+                .enumerate()
+                .filter(|&(_, c)| *c > 0.001)
+                .map(|(i, c)| {
+                    let name = self.species_names.get(i)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    (name.to_string(), *c)
+                })
+                .collect();
+            species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let species_lines: String = species_rows.iter()
+                .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.tooltip_text = format!(
+                "Coarse Cell ({}, {})\n\
+                 Fluid: {} / Solid: {}\n\
+                 Temp: {:.2} K ({:.2} C)\n\
+                 Species:\n{}",
+                data.coord.0, data.coord.1,
+                data.fluid_count, data.solid_count,
+                data.mean_temperature_kelvin,
+                data.mean_temperature_kelvin - 273.15,
+                species_lines,
+            );
+            self.show_tooltip = true;
+        } else {
+            self.show_tooltip = false;
         }
     }
 
     fn hovered_coarse_rect(&self) -> Option<egui::Rect> {
-        let sim = self.simulation.as_ref()?;
-        let window = self.window.as_ref()?;
         let (coarse_x, coarse_y) = self.last_tooltip_coord?;
-        let mip = sim.coarse_mip_factor()?;
-        let (grid_w, grid_h) = sim.dimensions();
-
-        let size = window.inner_size();
-        let scale = window.scale_factor() as f32;
-        let logical_w = size.width as f32 / scale;
-        let logical_h = size.height as f32 / scale;
-
-        let cell_w = logical_w * mip as f32 / grid_w as f32;
-        let cell_h = logical_h * mip as f32 / grid_h as f32;
-        let min_x = coarse_x as f32 * cell_w;
-        let min_y = coarse_y as f32 * cell_h;
-
-        Some(egui::Rect::from_min_size(
-            egui::pos2(min_x, min_y),
-            egui::vec2(cell_w, cell_h),
-        ))
+        let mip = self.simulation.as_ref()?.coarse_mip_factor()?;
+        self.coarse_rect(coarse_x, coarse_y, mip)
     }
 
     fn draw_hovered_coarse_outline(ctx: &egui::Context, rect: egui::Rect) {
@@ -989,28 +1286,20 @@ impl DemoApp {
 
     fn grid_to_screen(&self, grid_x: f32, grid_y: f32) -> Option<egui::Pos2> {
         let sim = self.simulation.as_ref()?;
-        let window = self.window.as_ref()?;
+        let viewport = self.simulation_viewport()?;
         let (grid_w, grid_h) = sim.dimensions();
-        let size = window.inner_size();
-        let scale = window.scale_factor() as f32;
-        let logical_w = size.width as f32 / scale;
-        let logical_h = size.height as f32 / scale;
 
         Some(egui::pos2(
-            grid_x * logical_w / grid_w as f32,
-            grid_y * logical_h / grid_h as f32,
+            viewport.rect.left() + grid_x * viewport.rect.width() / grid_w as f32,
+            viewport.rect.top() + grid_y * viewport.rect.height() / grid_h as f32,
         ))
     }
 
     fn grid_to_screen_scale(&self) -> Option<(f32, f32)> {
         let sim = self.simulation.as_ref()?;
-        let window = self.window.as_ref()?;
+        let viewport = self.simulation_viewport()?;
         let (grid_w, grid_h) = sim.dimensions();
-        let size = window.inner_size();
-        let scale = window.scale_factor() as f32;
-        let logical_w = size.width as f32 / scale;
-        let logical_h = size.height as f32 / scale;
-        Some((logical_w / grid_w as f32, logical_h / grid_h as f32))
+        Some((viewport.rect.width() / grid_w as f32, viewport.rect.height() / grid_h as f32))
     }
 
     fn draw_enzymes(&self, ctx: &egui::Context) {
@@ -1036,63 +1325,162 @@ impl DemoApp {
                 continue;
             };
 
-            let half_width = fluidsim::EnzymeEntity::BODY_HALF_WIDTH * entity.mobility_scale * scale_x;
-            let half_height = fluidsim::EnzymeEntity::BODY_HALF_HEIGHT * entity.catalytic_scale * scale_y;
+            let size_boost = 3.0;
+            let half_width = fluidsim::EnzymeEntity::BODY_HALF_WIDTH * entity.mobility_scale * scale_x * size_boost;
+            let half_height = fluidsim::EnzymeEntity::BODY_HALF_HEIGHT * entity.catalytic_scale * scale_y * size_boost;
             let (sin_theta, cos_theta) = entity.rotation_radians.sin_cos();
             let rotation = egui::emath::Rot2::from_angle(entity.rotation_radians);
 
-            let mut shell = Vec::with_capacity(24);
-            for step in 0..24 {
-                let angle = step as f32 / 24.0 * std::f32::consts::TAU;
-                let bean = 1.0 + 0.12 * (angle * 2.0).sin() - 0.08 * (angle * 3.0 + 0.35).cos();
+            let mut shell = Vec::with_capacity(36);
+            for step in 0..36 {
+                let angle = step as f32 / 36.0 * std::f32::consts::TAU;
+                let lobe_a = (angle * 2.0).sin() * 0.11;
+                let lobe_b = (angle * 3.0 + 0.45).cos() * 0.08;
+                let lobe_c = (angle * 5.0 - 0.2).sin() * 0.04;
+                let radius = 1.0 + lobe_a - lobe_b + lobe_c;
+                let squash = 0.96 + 0.09 * (angle - 0.35).cos();
                 let local = egui::vec2(
-                    half_width * bean * angle.cos(),
-                    half_height * (0.92 + 0.08 * angle.sin()) * angle.sin(),
+                    half_width * radius * angle.cos(),
+                    half_height * squash * radius * angle.sin(),
                 );
                 shell.push(center + rotation * local);
             }
 
             let shadow: Vec<_> = shell.iter()
-                .map(|point| *point + egui::vec2(5.0, 6.0))
+                .map(|point| *point + egui::vec2(8.0, 10.0))
                 .collect();
             painter.add(egui::Shape::convex_polygon(
                 shadow,
-                egui::Color32::from_rgba_unmultiplied(18, 26, 34, 72),
+                egui::Color32::from_rgba_unmultiplied(18, 26, 34, 68),
                 egui::Stroke::NONE,
             ));
 
             painter.add(egui::Shape::convex_polygon(
                 shell,
-                egui::Color32::from_rgb(222, 194, 132),
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(92, 54, 24)),
+                egui::Color32::from_rgb(229, 202, 144),
+                egui::Stroke::new(2.4, egui::Color32::from_rgb(102, 63, 28)),
             ));
 
-            let stripe_dir = egui::vec2(cos_theta * half_width * 0.45, sin_theta * half_width * 0.45);
-            let stripe_normal = egui::vec2(-sin_theta * half_height * 0.38, cos_theta * half_height * 0.38);
-            painter.line_segment(
-                [center - stripe_dir + stripe_normal, center + stripe_dir + stripe_normal],
-                egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(255, 240, 206, 210)),
-            );
-            painter.line_segment(
-                [center - stripe_dir - stripe_normal, center + stripe_dir - stripe_normal],
-                egui::Stroke::new(1.6, egui::Color32::from_rgba_unmultiplied(184, 126, 68, 180)),
+            for (offset, length_scale, color, width) in [
+                (0.38_f32, 0.54_f32, egui::Color32::from_rgba_unmultiplied(255, 242, 214, 220), 2.8_f32),
+                (0.02_f32, 0.62_f32, egui::Color32::from_rgba_unmultiplied(206, 150, 86, 180), 2.1_f32),
+                (-0.34_f32, 0.48_f32, egui::Color32::from_rgba_unmultiplied(255, 226, 180, 170), 1.7_f32),
+            ] {
+                let stripe_dir = egui::vec2(cos_theta * half_width * length_scale, sin_theta * half_width * length_scale);
+                let stripe_normal = egui::vec2(-sin_theta * half_height * offset, cos_theta * half_height * offset);
+                painter.line_segment(
+                    [center - stripe_dir + stripe_normal, center + stripe_dir + stripe_normal],
+                    egui::Stroke::new(width, color),
+                );
+            }
+
+            let highlight_center = center + rotation * egui::vec2(-half_width * 0.18, -half_height * 0.22);
+            painter.circle_filled(
+                highlight_center,
+                half_height * 0.72,
+                egui::Color32::from_rgba_unmultiplied(255, 244, 224, 48),
             );
 
             let pocket_radius = 0.55 * half_height.max(4.0);
+            let pocket_shadow = active_site + rotation * egui::vec2(4.0, 3.2);
+            painter.circle_filled(
+                pocket_shadow,
+                pocket_radius * 1.65,
+                egui::Color32::from_rgba_unmultiplied(24, 34, 44, 72),
+            );
             painter.circle_filled(
                 active_site,
-                pocket_radius * 1.35,
-                egui::Color32::from_rgba_unmultiplied(80, 122, 164, 80),
+                pocket_radius * 1.55,
+                egui::Color32::from_rgba_unmultiplied(72, 118, 162, 96),
             );
             painter.circle_filled(
                 active_site,
                 pocket_radius,
-                egui::Color32::from_rgb(108, 168, 214),
+                egui::Color32::from_rgb(102, 170, 218),
             );
             painter.circle_stroke(
                 active_site,
                 pocket_radius,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(232, 248, 255)),
+                egui::Stroke::new(2.4, egui::Color32::from_rgb(234, 248, 255)),
+            );
+        }
+    }
+
+    fn draw_detail_frame(&self, ctx: &egui::Context) {
+        if !self.detail_view {
+            return;
+        }
+        let Some(viewport) = self.simulation_viewport() else { return; };
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("detail_play_area"),
+        ));
+
+        painter.rect_stroke(
+            viewport.rect.expand(4.0),
+            18.0,
+            egui::Stroke::new(3.0, egui::Color32::from_rgba_unmultiplied(7, 12, 18, 180)),
+        );
+        painter.rect_stroke(
+            viewport.rect,
+            14.0,
+            egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 64)),
+        );
+    }
+
+    fn draw_detail_probes(&self, ctx: &egui::Context) {
+        if !self.detail_view || self.detail_probes.is_empty() {
+            return;
+        }
+
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("detail_probe_overlays"),
+        ));
+
+        for probe in &self.detail_probes {
+            let Some(sample_pos) = self.grid_to_screen(probe.sample_grid.0, probe.sample_grid.1) else {
+                continue;
+            };
+
+            if let Some(rect) = self.coarse_rect(probe.coarse_coord.0, probe.coarse_coord.1, probe.mip) {
+                painter.rect_stroke(
+                    rect.expand(0.5),
+                    6.0,
+                    egui::Stroke::new(1.4, egui::Color32::from_rgba_unmultiplied(255, 231, 140, 180)),
+                );
+            }
+
+            let area_response = egui::Area::new(egui::Id::new(("detail_probe", probe.title)))
+                .order(egui::Order::Tooltip)
+                .anchor(probe.slot.anchor(), probe.slot.offset())
+                .show(ctx, |ui| {
+                    let response = egui::Frame::none()
+                        .fill(egui::Color32::from_rgba_unmultiplied(7, 11, 16, 224))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36)))
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.set_width(DETAIL_PANEL_WIDTH);
+                            ui.label(egui::RichText::new(probe.title).strong().size(15.0));
+                            ui.small(format!("sample ({:.0}, {:.0})", probe.sample_grid.0, probe.sample_grid.1));
+                            ui.add_space(4.0);
+                            ui.monospace(&probe.tooltip_text);
+                        });
+                    response.response.rect
+                });
+
+            let panel_rect = area_response.inner;
+            let connector_start = Self::closest_point_on_rect(panel_rect, sample_pos);
+            let connector_color = egui::Color32::from_rgb(255, 231, 140);
+            painter.line_segment(
+                [connector_start, sample_pos],
+                egui::Stroke::new(1.6, connector_color),
+            );
+            painter.circle_filled(sample_pos, 4.0, connector_color);
+            painter.circle_stroke(
+                sample_pos,
+                7.5,
+                egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(255, 248, 214, 220)),
             );
         }
     }
@@ -1462,6 +1850,13 @@ impl DemoApp {
     }
 
     fn render_frame(&mut self) -> Result<RenderFrameMetrics> {
+        let render_viewport = self.simulation_viewport()
+            .map(|viewport| RenderViewport {
+                x: viewport.physical_x,
+                y: viewport.physical_y,
+                width: viewport.physical_width,
+                height: viewport.physical_height,
+            });
         let ctx = self.render_ctx.as_mut().unwrap();
         let pipeline = self.render_pipeline.as_mut().unwrap();
         let sim = self.simulation.as_mut().unwrap();
@@ -1507,7 +1902,9 @@ impl DemoApp {
         sim.record_render_barriers(cmd);
         
         // Record fluid visualization (keeps render pass open)
-        pipeline.record(ctx, cmd, image_index as usize, self.thermal_view);
+        let render_viewport = render_viewport
+            .unwrap_or_else(|| RenderViewport::fullscreen(ctx.swapchain_extent));
+        pipeline.record(ctx, cmd, image_index as usize, self.thermal_view, render_viewport);
         
         // Record egui draw commands inside the same render pass
         egui.cmd_draw(ctx, cmd, ctx.swapchain_extent)?;
@@ -1721,6 +2118,7 @@ impl ApplicationHandler for DemoApp {
                 
                 // Update tooltip
                 self.update_tooltip();
+                self.update_detail_probes();
                 let t2 = Instant::now();
 
                 let performance_overlay = self.performance_overlay;
@@ -1743,16 +2141,19 @@ impl ApplicationHandler for DemoApp {
                     let egui_ctx = self.egui_renderer.as_ref().unwrap().context().clone();
 
                     self.draw_editor_ui(&egui_ctx);
+                    self.draw_detail_frame(&egui_ctx);
 
                     if let Some(rect) = hovered_coarse_rect {
                         Self::draw_hovered_coarse_outline(&egui_ctx, rect);
                     }
                     self.draw_enzymes(&egui_ctx);
                     Self::draw_leak_channels(&egui_ctx, &leak_channel_overlays);
+                    self.draw_detail_probes(&egui_ctx);
                     
                     // Show tooltip near mouse
                     if self.show_tooltip {
                         egui::Window::new("Inspection")
+                            .order(egui::Order::Tooltip)
                             .fixed_pos(egui::pos2(self.mouse_pos.0 + 15.0, self.mouse_pos.1 + 15.0))
                             .collapsible(false)
                             .resizable(false)
@@ -1960,11 +2361,20 @@ fn main() -> Result<()> {
     if cli.smoke_test {
         log::info!("Running in smoke-test mode (5 frames then exit)");
     }
+    if cli.detail {
+        log::info!("Detail mode enabled: inset play area with pinned inspectors");
+    }
+    log::info!("Present mode preference: {:?}", cli.present_mode);
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     
-    let mut app = DemoApp::new(cli.smoke_test, scenario);
+    let mut app = DemoApp::new(
+        cli.smoke_test,
+        scenario,
+        cli.detail,
+        cli.present_mode.into(),
+    );
     event_loop.run_app(&mut app)?;
     
     Ok(())
