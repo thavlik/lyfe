@@ -219,6 +219,10 @@ cargo test -p fluidsim
 - Capturing with OBS might not work properly due to use of low-level Vulkan presentation.
 - Chemical species are currently represented with molecular formulae. Plans are in motion to represent species as full structural formulae.
 
+## Contributing
+
+Contributions are welcome. Feel free to open an issue to begin discussion on new features.
+
 ## License
 
 All of the code in this repository is released under Apache 2.0 / MIT dual-license.
