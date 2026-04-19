@@ -89,6 +89,13 @@ pub(crate) struct DetailProbeSnapshot {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub(crate) struct DetailProbeSpec {
+    pub(crate) title: &'static str,
+    pub(crate) slot: DetailPanelSlot,
+    pub(crate) sample_grid: (f32, f32),
+}
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct PerformanceSample {
     pub(crate) timestamp: Instant,
     pub(crate) frame_ms: f32,
