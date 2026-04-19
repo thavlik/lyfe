@@ -3,8 +3,8 @@
 //! Provides coarse-cell inspection that aggregates fine-cell data
 //! for display in tooltips.
 
-use crate::species::{SpeciesId, SpeciesRegistry};
 use crate::solid::{MaterialId, MaterialRegistry};
+use crate::species::{SpeciesId, SpeciesRegistry};
 use std::fmt;
 
 /// Coordinate of a coarse cell for inspection.
@@ -107,13 +107,11 @@ impl InspectionResult {
     /// Format as a tooltip string.
     pub fn format_tooltip(&self) -> String {
         let mut lines = Vec::new();
-        
+
         // Header with region type
         lines.push(format!(
             "Region ({}, {}) [{}x{}]: {}",
-            self.coord.x, self.coord.y,
-            self.coord.mip, self.coord.mip,
-            self.content
+            self.coord.x, self.coord.y, self.coord.mip, self.coord.mip, self.content
         ));
         lines.push(format!(
             "Cells: {} fluid, {} solid",
@@ -124,7 +122,7 @@ impl InspectionResult {
             self.mean_temperature_kelvin,
             self.mean_temperature_kelvin - 273.15,
         ));
-        
+
         // Species concentrations
         if !self.species.is_empty() {
             let mut species = self.species.clone();
@@ -135,7 +133,7 @@ impl InspectionResult {
                 lines.push(format!("  {}: {:.4}", entry.name, entry.concentration));
             }
         }
-        
+
         // Materials
         if !self.materials.is_empty() {
             lines.push(String::new());
@@ -144,7 +142,7 @@ impl InspectionResult {
                 lines.push(format!("  {}: {:.0}%", entry.name, entry.fraction * 100.0));
             }
         }
-        
+
         lines.join("\n")
     }
 }
@@ -207,15 +205,15 @@ impl Inspector {
         material_registry: &MaterialRegistry,
     ) -> InspectionResult {
         let (x0, y0, x1, y1) = coord.fine_bounds();
-        
+
         // Clamp to grid bounds
         let x1 = x1.min(grid_width);
         let y1 = y1.min(grid_height);
-        
+
         if x0 >= grid_width || y0 >= grid_height {
             return InspectionResult::empty(coord);
         }
-        
+
         // Count cells and accumulate species
         let mut fluid_count = 0u32;
         let mut solid_count = 0u32;
@@ -223,7 +221,7 @@ impl Inspector {
         let mut material_counts = vec![0u32; material_registry.count()];
         let mut temperature_sum = 0.0f64;
         let mut temperature_samples = 0u32;
-        
+
         for y in y0..y1 {
             for x in x0..x1 {
                 let idx = (y * grid_width + x) as usize;
@@ -231,7 +229,7 @@ impl Inspector {
                     temperature_sum += temperature as f64;
                     temperature_samples += 1;
                 }
-                
+
                 if solid_mask.get(idx).copied().unwrap_or(0) != 0 {
                     solid_count += 1;
                     let mat_id = material_ids.get(idx).copied().unwrap_or(0) as usize;
@@ -240,7 +238,7 @@ impl Inspector {
                     }
                 } else {
                     fluid_count += 1;
-                    
+
                     // Accumulate species concentrations
                     for (species_idx, conc_buffer) in concentrations.iter().enumerate() {
                         if let Some(&conc) = conc_buffer.get(idx) {
@@ -250,19 +248,19 @@ impl Inspector {
                 }
             }
         }
-        
+
         let total_cells = fluid_count + solid_count;
         if total_cells == 0 {
             return InspectionResult::empty(coord);
         }
-        
+
         // Determine content type
         let content = match (fluid_count, solid_count) {
             (_, 0) => RegionContent::Fluid,
             (0, _) => RegionContent::Solid,
             _ => RegionContent::Mixed,
         };
-        
+
         // Build species entries (average over fluid cells)
         let mut species = Vec::new();
         if fluid_count > 0 {
@@ -277,14 +275,15 @@ impl Inspector {
                 }
             }
         }
-        
+
         // Sort by concentration, highest first
         species.sort_by(|a, b| b.concentration.total_cmp(&a.concentration));
-        
+
         // Build material entries
         let mut materials = Vec::new();
         for (mat_idx, &count) in material_counts.iter().enumerate() {
-            if count > 0 && mat_idx > 0 {  // Skip "none" material at index 0
+            if count > 0 && mat_idx > 0 {
+                // Skip "none" material at index 0
                 if let Some(mat_info) = material_registry.get(MaterialId::new(mat_idx as u32)) {
                     materials.push(MaterialEntry {
                         name: mat_info.name.to_string(),
@@ -294,7 +293,7 @@ impl Inspector {
                 }
             }
         }
-        
+
         // Sort materials by fraction
         materials.sort_by(|a, b| b.fraction.partial_cmp(&a.fraction).unwrap());
         let mean_temperature_kelvin = if temperature_samples > 0 {
@@ -302,7 +301,7 @@ impl Inspector {
         } else {
             293.15
         };
-        
+
         InspectionResult {
             coord,
             content,

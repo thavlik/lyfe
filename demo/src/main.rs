@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fluidsim::{Simulation, SimulationConfig};
-use renderer::{EguiRenderer, PresentModePreference, RenderContext, RenderPipeline, RenderViewport};
+use renderer::{
+    EguiRenderer, PresentModePreference, RenderContext, RenderPipeline, RenderViewport,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -177,7 +179,8 @@ struct LeakChannelDraft {
 
 impl LeakChannelDraft {
     fn from_channel(channel: &fluidsim::LeakChannel, sim: &Simulation) -> Self {
-        let species_name = sim.species_registry()
+        let species_name = sim
+            .species_registry()
             .get(channel.species)
             .map(|species| species.name.to_string())
             .unwrap_or_default();
@@ -191,7 +194,8 @@ impl LeakChannelDraft {
     }
 
     fn to_channel(&self, sim: &Simulation) -> Result<fluidsim::LeakChannel> {
-        let species = sim.species_registry()
+        let species = sim
+            .species_registry()
             .id_of(self.species_name.trim())
             .ok_or_else(|| anyhow::anyhow!("Unknown species '{}'", self.species_name.trim()))?;
         Ok(fluidsim::LeakChannel::new(
@@ -204,7 +208,9 @@ impl LeakChannelDraft {
     }
 
     fn rotate_eighth_turn(&mut self) {
-        self.rotation_byte = self.rotation_byte.wrapping_add(fluidsim::LeakChannel::EIGHTH_TURN);
+        self.rotation_byte = self
+            .rotation_byte
+            .wrapping_add(fluidsim::LeakChannel::EIGHTH_TURN);
     }
 
     fn rotation_degrees(&self) -> u32 {
@@ -318,16 +324,16 @@ struct DemoApp {
     render_pipeline: Option<RenderPipeline>,
     egui_renderer: Option<EguiRenderer>,
     simulation: Option<Simulation>,
-    
+
     // State
     mouse_pos: (f32, f32),
     inspection_mip: u32,
     show_tooltip: bool,
     tooltip_text: String,
-    species_names: Vec<String>,  // Cached species names for tooltip display
+    species_names: Vec<String>, // Cached species names for tooltip display
     last_tooltip_coord: Option<(u32, u32)>,
     hovered_leak_channel: Option<usize>,
-    
+
     // Thermal view (momentary display while T is held)
     thermal_view: bool,
     performance_overlay: bool,
@@ -340,7 +346,7 @@ struct DemoApp {
     inspector_dirty: bool,
     inspector_last_apply: Instant,
     inspector_error: Option<String>,
-    
+
     // Timing
     last_frame: Instant,
     frame_count: u64,
@@ -351,7 +357,7 @@ struct DemoApp {
     detail_probes: Vec<DetailProbeSnapshot>,
     detail_last_refresh: Instant,
     present_mode: PresentModePreference,
-    
+
     // Flags
     needs_resize: bool,
     smoke_test: bool,
@@ -414,7 +420,7 @@ impl DemoApp {
         log::info!("Creating simulation on shared Vulkan device...");
         let simulation = self.create_simulation(&render_ctx)?;
         log::info!("Simulation created successfully");
-        
+
         log::info!("Creating render pipeline...");
         // Compute species colors: explicit overrides, then hash-based fallback
         let species_colors = compute_species_colors(simulation.species_registry());
@@ -427,28 +433,29 @@ impl DemoApp {
             &species_colors,
         )?;
         log::info!("Render pipeline created successfully");
-        
+
         log::info!("Creating egui renderer...");
         // Create egui renderer
         let egui_renderer = EguiRenderer::new(&render_ctx, &window)?;
         log::info!("Egui renderer created successfully");
-        
+
         // Cache species names for tooltip display
-        let species_names: Vec<String> = simulation.species_registry()
+        let species_names: Vec<String> = simulation
+            .species_registry()
             .iter()
             .map(|s| s.name.to_string())
             .collect();
 
         let mut simulation = simulation;
         simulation.set_async_inspection_interval(TOOLTIP_REFRESH_INTERVAL);
-        
+
         self.window = Some(window);
         self.render_ctx = Some(render_ctx);
         self.render_pipeline = Some(render_pipeline);
         self.egui_renderer = Some(egui_renderer);
         self.simulation = Some(simulation);
         self.species_names = species_names;
-        
+
         Ok(())
     }
 
@@ -489,10 +496,18 @@ impl DemoApp {
         let context = render_ctx.shared_gpu_context();
         let mut simulation = match self.scenario {
             ScenarioKind::Basic => Simulation::new_demo_with_shared_gpu_context(config, context)?,
-            ScenarioKind::AcidBase => Simulation::new_acid_base_with_shared_gpu_context(config, context)?,
-            ScenarioKind::Buffers => Simulation::new_buffers_with_shared_gpu_context(config, context)?,
-            ScenarioKind::Catalyst => Simulation::new_catalyst_with_shared_gpu_context(config, context)?,
-            ScenarioKind::Enzyme => Simulation::new_enzyme_with_shared_gpu_context(config, context)?,
+            ScenarioKind::AcidBase => {
+                Simulation::new_acid_base_with_shared_gpu_context(config, context)?
+            }
+            ScenarioKind::Buffers => {
+                Simulation::new_buffers_with_shared_gpu_context(config, context)?
+            }
+            ScenarioKind::Catalyst => {
+                Simulation::new_catalyst_with_shared_gpu_context(config, context)?
+            }
+            ScenarioKind::Enzyme => {
+                Simulation::new_enzyme_with_shared_gpu_context(config, context)?
+            }
             ScenarioKind::Leak => Simulation::new_leak_with_shared_gpu_context(config, context)?,
         };
         simulation.set_async_inspection_interval(TOOLTIP_REFRESH_INTERVAL);
@@ -506,7 +521,8 @@ impl DemoApp {
         }
 
         let simulation = self.create_simulation(render_ctx)?;
-        self.species_names = simulation.species_registry()
+        self.species_names = simulation
+            .species_registry()
             .iter()
             .map(|s| s.name.to_string())
             .collect();
@@ -545,8 +561,11 @@ impl DemoApp {
         }
 
         let rect = if self.detail_view {
-            let margin = (logical_w.min(logical_h) * 0.14).clamp(DETAIL_MARGIN_MIN, DETAIL_MARGIN_MAX);
-            let side = (logical_w - 2.0 * margin).min(logical_h - 2.0 * margin).max(1.0);
+            let margin =
+                (logical_w.min(logical_h) * 0.14).clamp(DETAIL_MARGIN_MIN, DETAIL_MARGIN_MAX);
+            let side = (logical_w - 2.0 * margin)
+                .min(logical_h - 2.0 * margin)
+                .max(1.0);
             egui::Rect::from_center_size(
                 egui::pos2(logical_w * 0.5, logical_h * 0.5),
                 egui::vec2(side, side),
@@ -626,8 +645,14 @@ impl DemoApp {
         let outside = (self.inspection_mip as f32 * 1.75).max(14.0);
         let mid_y = (bounds.inner_y0 + bounds.inner_y1) as f32 * 0.5;
 
-        let top_right = self.clamp_grid_sample(bounds.inner_x1 as f32 - inset, bounds.inner_y0 as f32 + inset)?;
-        let bottom_left = self.clamp_grid_sample(bounds.inner_x0 as f32 + inset, bounds.inner_y1 as f32 - inset)?;
+        let top_right = self.clamp_grid_sample(
+            bounds.inner_x1 as f32 - inset,
+            bounds.inner_y0 as f32 + inset,
+        )?;
+        let bottom_left = self.clamp_grid_sample(
+            bounds.inner_x0 as f32 + inset,
+            bounds.inner_y1 as f32 - inset,
+        )?;
         let center = self.clamp_grid_sample(
             (bounds.inner_x0 + bounds.inner_x1) as f32 * 0.5,
             (bounds.inner_y0 + bounds.inner_y1) as f32 * 0.5,
@@ -648,7 +673,10 @@ impl DemoApp {
         let mut lines = vec![
             format!("Coarse: ({}, {})", result.coord.x, result.coord.y),
             format!("Region: {}", result.content),
-            format!("Cells: {} fluid / {} solid", result.fluid_cell_count, result.solid_cell_count),
+            format!(
+                "Cells: {} fluid / {} solid",
+                result.fluid_cell_count, result.solid_cell_count
+            ),
             format!(
                 "Temp: {:.2} K ({:.2} C)",
                 result.mean_temperature_kelvin,
@@ -659,7 +687,10 @@ impl DemoApp {
         if !result.species.is_empty() {
             lines.push("Species:".to_string());
             for entry in result.species.iter().take(4) {
-                lines.push(format!("  {:<10} {:>7.3} M", entry.name, entry.concentration));
+                lines.push(format!(
+                    "  {:<10} {:>7.3} M",
+                    entry.name, entry.concentration
+                ));
             }
             if result.species.len() > 4 {
                 lines.push(format!("  +{} more", result.species.len() - 4));
@@ -669,7 +700,11 @@ impl DemoApp {
         if !result.materials.is_empty() {
             lines.push("Materials:".to_string());
             for material in result.materials.iter().take(2) {
-                lines.push(format!("  {} {:>5.0}%", material.name, material.fraction * 100.0));
+                lines.push(format!(
+                    "  {} {:>5.0}%",
+                    material.name,
+                    material.fraction * 100.0
+                ));
             }
         }
 
@@ -681,7 +716,9 @@ impl DemoApp {
             self.detail_probes.clear();
             return;
         }
-        if !self.detail_probes.is_empty() && self.detail_last_refresh.elapsed() < TOOLTIP_REFRESH_INTERVAL {
+        if !self.detail_probes.is_empty()
+            && self.detail_last_refresh.elapsed() < TOOLTIP_REFRESH_INTERVAL
+        {
             return;
         }
 
@@ -722,10 +759,7 @@ impl DemoApp {
 
     fn grid_position_from_mouse(&self) -> Option<(i32, i32)> {
         let (grid_x, grid_y) = self.mouse_grid_position()?;
-        Some((
-            grid_x.floor() as i32,
-            grid_y.floor() as i32,
-        ))
+        Some((grid_x.floor() as i32, grid_y.floor() as i32))
     }
 
     fn default_leak_species_name(&self) -> String {
@@ -736,7 +770,8 @@ impl DemoApp {
         if sim.species_registry().id_of("Na+").is_some() {
             "Na+".to_string()
         } else {
-            sim.species_registry().iter()
+            sim.species_registry()
+                .iter()
                 .next()
                 .map(|species| species.name.to_string())
                 .unwrap_or_else(|| "Na+".to_string())
@@ -773,8 +808,10 @@ impl DemoApp {
             }
             let mut draft = transform.leak_channel.clone();
             let (mouse_x, mouse_y) = self.grid_position_from_mouse()?;
-            draft.x = (mouse_x + transform.mouse_offset.0).clamp(0, sim.dimensions().0.saturating_sub(1) as i32);
-            draft.y = (mouse_y + transform.mouse_offset.1).clamp(0, sim.dimensions().1.saturating_sub(1) as i32);
+            draft.x = (mouse_x + transform.mouse_offset.0)
+                .clamp(0, sim.dimensions().0.saturating_sub(1) as i32);
+            draft.y = (mouse_y + transform.mouse_offset.1)
+                .clamp(0, sim.dimensions().1.saturating_sub(1) as i32);
             draft
         } else {
             let placement = self.placement_state.as_ref()?;
@@ -840,10 +877,11 @@ impl DemoApp {
         self.inspector_error = None;
         self.inspector_last_apply = Instant::now();
         self.inspector_draft = match selection {
-            Some(SelectedEntity::LeakChannel(index)) => {
-                self.simulation.as_ref()
-                    .and_then(|sim| sim.leak_channels().get(index).map(|channel| LeakChannelDraft::from_channel(channel, sim)))
-            }
+            Some(SelectedEntity::LeakChannel(index)) => self.simulation.as_ref().and_then(|sim| {
+                sim.leak_channels()
+                    .get(index)
+                    .map(|channel| LeakChannelDraft::from_channel(channel, sim))
+            }),
             None => None,
         };
     }
@@ -893,15 +931,17 @@ impl DemoApp {
                 if let Some(channel) = self.preview_leak_channel() {
                     if let Some(sim) = &mut self.simulation {
                         match selection {
-                            SelectedEntity::LeakChannel(index) => match sim.update_leak_channel(index, channel) {
-                                Ok(()) => {
-                                    self.transform_state = None;
-                                    self.select_entity(Some(selection));
+                            SelectedEntity::LeakChannel(index) => {
+                                match sim.update_leak_channel(index, channel) {
+                                    Ok(()) => {
+                                        self.transform_state = None;
+                                        self.select_entity(Some(selection));
+                                    }
+                                    Err(error) => {
+                                        self.inspector_error = Some(error.to_string());
+                                    }
                                 }
-                                Err(error) => {
-                                    self.inspector_error = Some(error.to_string());
-                                }
-                            },
+                            }
                         }
                     }
                 }
@@ -960,7 +1000,8 @@ impl DemoApp {
         let sim = self.simulation.as_ref()?;
         let channel = self.preview_leak_channel()?;
         let center = self.grid_to_screen(channel.x as f32 + 0.5, channel.y as f32 + 0.5)?;
-        let species_name = sim.species_registry()
+        let species_name = sim
+            .species_registry()
             .get(channel.species)
             .map(|species| species.name.as_ref())
             .unwrap_or("?");
@@ -970,7 +1011,9 @@ impl DemoApp {
             _ => egui::Color32::from_rgb(230, 230, 230),
         };
 
-        if let Some(((sink_x, sink_y), (source_x, source_y))) = sim.resolve_leak_channel_endpoints(&channel) {
+        if let Some(((sink_x, sink_y), (source_x, source_y))) =
+            sim.resolve_leak_channel_endpoints(&channel)
+        {
             Some(LeakChannelOverlay {
                 center,
                 sink: self.grid_to_screen(sink_x as f32 + 0.5, sink_y as f32 + 0.5)?,
@@ -1003,17 +1046,28 @@ impl DemoApp {
             .show(ctx, |ui| {
                 Frame::none()
                     .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 220))
-                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 32)))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 32),
+                    ))
                     .inner_margin(Margin::same(8.0))
                     .show(ui, |ui| {
-                        let paused = self.simulation.as_ref()
+                        let paused = self
+                            .simulation
+                            .as_ref()
                             .map(|sim| sim.is_paused())
                             .unwrap_or(false);
 
-                        if ui.button(RichText::new(if paused { "PLAY" } else { "PAUSE" }).strong()).clicked() {
+                        if ui
+                            .button(RichText::new(if paused { "PLAY" } else { "PAUSE" }).strong())
+                            .clicked()
+                        {
                             if let Some(sim) = self.simulation.as_mut() {
                                 sim.toggle_pause();
-                                log::info!("Simulation {}", if sim.is_paused() { "paused" } else { "resumed" });
+                                log::info!(
+                                    "Simulation {}",
+                                    if sim.is_paused() { "paused" } else { "resumed" }
+                                );
                             }
                         }
 
@@ -1045,17 +1099,26 @@ impl DemoApp {
 
         if let Some(placement) = &self.placement_state {
             egui::Area::new("entity_placement_status".into())
-                .anchor(Align2::LEFT_TOP, egui::vec2(12.0, if self.create_menu_open { 170.0 } else { 56.0 }))
+                .anchor(
+                    Align2::LEFT_TOP,
+                    egui::vec2(12.0, if self.create_menu_open { 170.0 } else { 56.0 }),
+                )
                 .show(ctx, |ui| {
                     Frame::none()
                         .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 215))
-                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28)))
+                        .stroke(Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+                        ))
                         .inner_margin(Margin::same(10.0))
                         .show(ui, |ui| {
                             ui.label(RichText::new("Placing Leak Channel").strong());
                             ui.label(format!("Species: {}", placement.leak_channel.species_name));
                             ui.label(format!("Rate: {:.2}", placement.leak_channel.rate));
-                            ui.label(format!("Rotation: {} deg", placement.leak_channel.rotation_degrees()));
+                            ui.label(format!(
+                                "Rotation: {} deg",
+                                placement.leak_channel.rotation_degrees()
+                            ));
                             ui.label("Click in the sim to place. Press r to rotate 45 deg.");
                         });
                 });
@@ -1063,24 +1126,37 @@ impl DemoApp {
 
         if let Some(transform) = &self.transform_state {
             egui::Area::new("entity_transform_status".into())
-                .anchor(Align2::LEFT_TOP, egui::vec2(12.0, if self.create_menu_open { 170.0 } else { 56.0 }))
+                .anchor(
+                    Align2::LEFT_TOP,
+                    egui::vec2(12.0, if self.create_menu_open { 170.0 } else { 56.0 }),
+                )
                 .show(ctx, |ui| {
                     Frame::none()
                         .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 215))
-                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28)))
+                        .stroke(Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+                        ))
                         .inner_margin(Margin::same(10.0))
                         .show(ui, |ui| {
                             ui.label(RichText::new("Transforming Leak Channel").strong());
                             ui.label(format!("Species: {}", transform.leak_channel.species_name));
                             ui.label(format!("Rate: {:.2}", transform.leak_channel.rate));
-                            ui.label(format!("Rotation: {} deg", transform.leak_channel.rotation_degrees()));
-                            ui.label("Move with the mouse, click to confirm, press r to rotate 45 deg.");
+                            ui.label(format!(
+                                "Rotation: {} deg",
+                                transform.leak_channel.rotation_degrees()
+                            ));
+                            ui.label(
+                                "Move with the mouse, click to confirm, press r to rotate 45 deg.",
+                            );
                         });
                 });
         }
 
         if let Some(SelectedEntity::LeakChannel(index)) = self.selected_entity {
-            let (max_x, max_y) = self.simulation.as_ref()
+            let (max_x, max_y) = self
+                .simulation
+                .as_ref()
                 .map(|sim| sim.dimensions())
                 .unwrap_or((512, 512));
             egui::Area::new("entity_inspector".into())
@@ -1171,7 +1247,8 @@ impl DemoApp {
 
         if let Some(channel_index) = sim.hovered_leak_channel(grid_x, grid_y) {
             self.hovered_leak_channel = Some(channel_index);
-            self.tooltip_text = sim.leak_channel_tooltip(channel_index)
+            self.tooltip_text = sim
+                .leak_channel_tooltip(channel_index)
                 .unwrap_or_else(|| "Leak Channel".to_string());
             self.show_tooltip = true;
             return;
@@ -1189,29 +1266,33 @@ impl DemoApp {
 
         let cached_data = sim.get_cached_inspection();
         let cached_matches_hover = cached_data.as_ref().map(|data| data.coord) == coarse_coord;
-        let cached_is_stale = cached_data.as_ref()
+        let cached_is_stale = cached_data
+            .as_ref()
             .map(|data| data.age >= TOOLTIP_REFRESH_INTERVAL)
             .unwrap_or(true);
         let hover_changed = coarse_coord != self.last_tooltip_coord;
 
-        if !sim.is_inspection_pending() && (hover_changed || !cached_matches_hover || cached_is_stale) {
+        if !sim.is_inspection_pending()
+            && (hover_changed || !cached_matches_hover || cached_is_stale)
+        {
             let _ = sim.request_async_inspection(grid_x, grid_y);
         }
         self.last_tooltip_coord = coarse_coord;
 
         if let Some(data) = sim.poll_async_inspection() {
-            let mut species_rows: Vec<_> = data.concentrations.iter()
+            let mut species_rows: Vec<_> = data
+                .concentrations
+                .iter()
                 .enumerate()
                 .filter(|&(_, c)| *c > 0.001)
                 .map(|(i, c)| {
-                    let name = self.species_names.get(i)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?");
+                    let name = self.species_names.get(i).map(|s| s.as_str()).unwrap_or("?");
                     (name.to_string(), *c)
                 })
                 .collect();
             species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let species_lines: String = species_rows.iter()
+            let species_lines: String = species_rows
+                .iter()
                 .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -1220,26 +1301,29 @@ impl DemoApp {
                  Fluid: {} / Solid: {}\n\
                  Temp: {:.2} K ({:.2} C)\n\
                  Species:\n{}",
-                data.coord.0, data.coord.1,
-                data.fluid_count, data.solid_count,
+                data.coord.0,
+                data.coord.1,
+                data.fluid_count,
+                data.solid_count,
                 data.mean_temperature_kelvin,
                 data.mean_temperature_kelvin - 273.15,
                 species_lines,
             );
             self.show_tooltip = true;
         } else if let Some(data) = cached_data {
-            let mut species_rows: Vec<_> = data.concentrations.iter()
+            let mut species_rows: Vec<_> = data
+                .concentrations
+                .iter()
                 .enumerate()
                 .filter(|&(_, c)| *c > 0.001)
                 .map(|(i, c)| {
-                    let name = self.species_names.get(i)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?");
+                    let name = self.species_names.get(i).map(|s| s.as_str()).unwrap_or("?");
                     (name.to_string(), *c)
                 })
                 .collect();
             species_rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let species_lines: String = species_rows.iter()
+            let species_lines: String = species_rows
+                .iter()
                 .map(|(name, conc)| format!("  {:<6} {:>8.3} M", name, conc))
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -1248,8 +1332,10 @@ impl DemoApp {
                  Fluid: {} / Solid: {}\n\
                  Temp: {:.2} K ({:.2} C)\n\
                  Species:\n{}",
-                data.coord.0, data.coord.1,
-                data.fluid_count, data.solid_count,
+                data.coord.0,
+                data.coord.1,
+                data.fluid_count,
+                data.solid_count,
                 data.mean_temperature_kelvin,
                 data.mean_temperature_kelvin - 273.15,
                 species_lines,
@@ -1299,15 +1385,22 @@ impl DemoApp {
         let sim = self.simulation.as_ref()?;
         let viewport = self.simulation_viewport()?;
         let (grid_w, grid_h) = sim.dimensions();
-        Some((viewport.rect.width() / grid_w as f32, viewport.rect.height() / grid_h as f32))
+        Some((
+            viewport.rect.width() / grid_w as f32,
+            viewport.rect.height() / grid_h as f32,
+        ))
     }
 
     fn draw_enzymes(&self, ctx: &egui::Context) {
-        let Some(sim) = self.simulation.as_ref() else { return; };
+        let Some(sim) = self.simulation.as_ref() else {
+            return;
+        };
         if sim.enzyme_entities().is_empty() {
             return;
         }
-        let Some((scale_x, scale_y)) = self.grid_to_screen_scale() else { return; };
+        let Some((scale_x, scale_y)) = self.grid_to_screen_scale() else {
+            return;
+        };
 
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
@@ -1326,8 +1419,14 @@ impl DemoApp {
             };
 
             let size_boost = 3.0;
-            let half_width = fluidsim::EnzymeEntity::BODY_HALF_WIDTH * entity.mobility_scale * scale_x * size_boost;
-            let half_height = fluidsim::EnzymeEntity::BODY_HALF_HEIGHT * entity.catalytic_scale * scale_y * size_boost;
+            let half_width = fluidsim::EnzymeEntity::BODY_HALF_WIDTH
+                * entity.mobility_scale
+                * scale_x
+                * size_boost;
+            let half_height = fluidsim::EnzymeEntity::BODY_HALF_HEIGHT
+                * entity.catalytic_scale
+                * scale_y
+                * size_boost;
             let (sin_theta, cos_theta) = entity.rotation_radians.sin_cos();
             let rotation = egui::emath::Rot2::from_angle(entity.rotation_radians);
 
@@ -1346,7 +1445,8 @@ impl DemoApp {
                 shell.push(center + rotation * local);
             }
 
-            let shadow: Vec<_> = shell.iter()
+            let shadow: Vec<_> = shell
+                .iter()
                 .map(|point| *point + egui::vec2(8.0, 10.0))
                 .collect();
             painter.add(egui::Shape::convex_polygon(
@@ -1362,19 +1462,44 @@ impl DemoApp {
             ));
 
             for (offset, length_scale, color, width) in [
-                (0.38_f32, 0.54_f32, egui::Color32::from_rgba_unmultiplied(255, 242, 214, 220), 2.8_f32),
-                (0.02_f32, 0.62_f32, egui::Color32::from_rgba_unmultiplied(206, 150, 86, 180), 2.1_f32),
-                (-0.34_f32, 0.48_f32, egui::Color32::from_rgba_unmultiplied(255, 226, 180, 170), 1.7_f32),
+                (
+                    0.38_f32,
+                    0.54_f32,
+                    egui::Color32::from_rgba_unmultiplied(255, 242, 214, 220),
+                    2.8_f32,
+                ),
+                (
+                    0.02_f32,
+                    0.62_f32,
+                    egui::Color32::from_rgba_unmultiplied(206, 150, 86, 180),
+                    2.1_f32,
+                ),
+                (
+                    -0.34_f32,
+                    0.48_f32,
+                    egui::Color32::from_rgba_unmultiplied(255, 226, 180, 170),
+                    1.7_f32,
+                ),
             ] {
-                let stripe_dir = egui::vec2(cos_theta * half_width * length_scale, sin_theta * half_width * length_scale);
-                let stripe_normal = egui::vec2(-sin_theta * half_height * offset, cos_theta * half_height * offset);
+                let stripe_dir = egui::vec2(
+                    cos_theta * half_width * length_scale,
+                    sin_theta * half_width * length_scale,
+                );
+                let stripe_normal = egui::vec2(
+                    -sin_theta * half_height * offset,
+                    cos_theta * half_height * offset,
+                );
                 painter.line_segment(
-                    [center - stripe_dir + stripe_normal, center + stripe_dir + stripe_normal],
+                    [
+                        center - stripe_dir + stripe_normal,
+                        center + stripe_dir + stripe_normal,
+                    ],
                     egui::Stroke::new(width, color),
                 );
             }
 
-            let highlight_center = center + rotation * egui::vec2(-half_width * 0.18, -half_height * 0.22);
+            let highlight_center =
+                center + rotation * egui::vec2(-half_width * 0.18, -half_height * 0.22);
             painter.circle_filled(
                 highlight_center,
                 half_height * 0.72,
@@ -1410,7 +1535,9 @@ impl DemoApp {
         if !self.detail_view {
             return;
         }
-        let Some(viewport) = self.simulation_viewport() else { return; };
+        let Some(viewport) = self.simulation_viewport() else {
+            return;
+        };
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("detail_play_area"),
@@ -1424,7 +1551,10 @@ impl DemoApp {
         painter.rect_stroke(
             viewport.rect,
             14.0,
-            egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 64)),
+            egui::Stroke::new(
+                1.5,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 64),
+            ),
         );
     }
 
@@ -1439,15 +1569,21 @@ impl DemoApp {
         ));
 
         for probe in &self.detail_probes {
-            let Some(sample_pos) = self.grid_to_screen(probe.sample_grid.0, probe.sample_grid.1) else {
+            let Some(sample_pos) = self.grid_to_screen(probe.sample_grid.0, probe.sample_grid.1)
+            else {
                 continue;
             };
 
-            if let Some(rect) = self.coarse_rect(probe.coarse_coord.0, probe.coarse_coord.1, probe.mip) {
+            if let Some(rect) =
+                self.coarse_rect(probe.coarse_coord.0, probe.coarse_coord.1, probe.mip)
+            {
                 painter.rect_stroke(
                     rect.expand(0.5),
                     6.0,
-                    egui::Stroke::new(1.4, egui::Color32::from_rgba_unmultiplied(255, 231, 140, 180)),
+                    egui::Stroke::new(
+                        1.4,
+                        egui::Color32::from_rgba_unmultiplied(255, 231, 140, 180),
+                    ),
                 );
             }
 
@@ -1457,12 +1593,18 @@ impl DemoApp {
                 .show(ctx, |ui| {
                     let response = egui::Frame::none()
                         .fill(egui::Color32::from_rgba_unmultiplied(7, 11, 16, 224))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36)))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36),
+                        ))
                         .inner_margin(egui::Margin::same(10.0))
                         .show(ui, |ui| {
                             ui.set_width(DETAIL_PANEL_WIDTH);
                             ui.label(egui::RichText::new(probe.title).strong().size(15.0));
-                            ui.small(format!("sample ({:.0}, {:.0})", probe.sample_grid.0, probe.sample_grid.1));
+                            ui.small(format!(
+                                "sample ({:.0}, {:.0})",
+                                probe.sample_grid.0, probe.sample_grid.1
+                            ));
                             ui.add_space(4.0);
                             ui.monospace(&probe.tooltip_text);
                         });
@@ -1480,30 +1622,39 @@ impl DemoApp {
             painter.circle_stroke(
                 sample_pos,
                 7.5,
-                egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(255, 248, 214, 220)),
+                egui::Stroke::new(
+                    1.2,
+                    egui::Color32::from_rgba_unmultiplied(255, 248, 214, 220),
+                ),
             );
         }
     }
 
     fn leak_channel_overlays(&self) -> Vec<LeakChannelOverlay> {
-        let Some(sim) = self.simulation.as_ref() else { return Vec::new(); };
+        let Some(sim) = self.simulation.as_ref() else {
+            return Vec::new();
+        };
         let mut overlays = Vec::new();
 
         for (index, channel) in sim.leak_channels().iter().enumerate() {
-            let Some(center) = self.grid_to_screen(channel.x as f32 + 0.5, channel.y as f32 + 0.5) else {
+            let Some(center) = self.grid_to_screen(channel.x as f32 + 0.5, channel.y as f32 + 0.5)
+            else {
                 continue;
             };
-            let Some(((sink_x, sink_y), (source_x, source_y))) = sim.leak_channel_endpoints(index) else {
+            let Some(((sink_x, sink_y), (source_x, source_y))) = sim.leak_channel_endpoints(index)
+            else {
                 continue;
             };
             let Some(sink) = self.grid_to_screen(sink_x as f32 + 0.5, sink_y as f32 + 0.5) else {
                 continue;
             };
-            let Some(source) = self.grid_to_screen(source_x as f32 + 0.5, source_y as f32 + 0.5) else {
+            let Some(source) = self.grid_to_screen(source_x as f32 + 0.5, source_y as f32 + 0.5)
+            else {
                 continue;
             };
 
-            let species_name = sim.species_registry()
+            let species_name = sim
+                .species_registry()
                 .get(channel.species)
                 .map(|info| info.name.as_ref())
                 .unwrap_or("?");
@@ -1547,7 +1698,12 @@ impl DemoApp {
             };
             let flow_color = if overlay.ghost {
                 if overlay.valid {
-                    egui::Color32::from_rgba_unmultiplied(overlay.color.r(), overlay.color.g(), overlay.color.b(), 170)
+                    egui::Color32::from_rgba_unmultiplied(
+                        overlay.color.r(),
+                        overlay.color.g(),
+                        overlay.color.b(),
+                        170,
+                    )
                 } else {
                     egui::Color32::from_rgba_unmultiplied(255, 120, 120, 170)
                 }
@@ -1581,8 +1737,15 @@ impl DemoApp {
                 egui::Color32::from_rgba_unmultiplied(255, 255, 255, 185)
             };
 
-            let delta = egui::vec2(overlay.source.x - overlay.sink.x, overlay.source.y - overlay.sink.y);
-            let tangent = if delta.length_sq() > 0.0 { delta.normalized() } else { egui::vec2(1.0, 0.0) };
+            let delta = egui::vec2(
+                overlay.source.x - overlay.sink.x,
+                overlay.source.y - overlay.sink.y,
+            );
+            let tangent = if delta.length_sq() > 0.0 {
+                delta.normalized()
+            } else {
+                egui::vec2(1.0, 0.0)
+            };
             let normal = egui::vec2(-tangent.y, tangent.x);
             let half_span = (delta.length() * 0.5).max(14.0);
             let body_half_length = (half_span * 0.78).clamp(14.0, 28.0);
@@ -1598,8 +1761,10 @@ impl DemoApp {
             let stripe_start = capsule_start + tangent * (body_half_length * 0.18);
             let stripe_end = capsule_end - tangent * (body_half_length * 0.34);
             let highlight_offset = normal * (body_half_width * 0.28);
-            let highlight_start = capsule_start + tangent * (body_half_length * 0.24) + highlight_offset;
-            let highlight_end = capsule_end - tangent * (body_half_length * 0.58) + highlight_offset;
+            let highlight_start =
+                capsule_start + tangent * (body_half_length * 0.24) + highlight_offset;
+            let highlight_end =
+                capsule_end - tangent * (body_half_length * 0.58) + highlight_offset;
 
             painter.line_segment(
                 [capsule_start, capsule_end],
@@ -1641,7 +1806,14 @@ impl DemoApp {
                     arrow_base - normal * arrow_half_width,
                 ],
                 flow_color,
-                egui::Stroke::new(if overlay.selected || overlay.hovered { 2.5 } else { 1.8 }, outline),
+                egui::Stroke::new(
+                    if overlay.selected || overlay.hovered {
+                        2.5
+                    } else {
+                        1.8
+                    },
+                    outline,
+                ),
             ));
         }
     }
@@ -1658,10 +1830,21 @@ impl DemoApp {
     }
 
     fn performance_summary(&self) -> PerformanceSummary {
-        let current_frame_ms = self.performance_samples.back().map(|s| s.frame_ms).unwrap_or(0.0);
-        let current_fps = if current_frame_ms > 0.0 { 1000.0 / current_frame_ms } else { 0.0 };
+        let current_frame_ms = self
+            .performance_samples
+            .back()
+            .map(|s| s.frame_ms)
+            .unwrap_or(0.0);
+        let current_fps = if current_frame_ms > 0.0 {
+            1000.0 / current_frame_ms
+        } else {
+            0.0
+        };
 
-        let average_fps_30s = match (self.performance_samples.front(), self.performance_samples.back()) {
+        let average_fps_30s = match (
+            self.performance_samples.front(),
+            self.performance_samples.back(),
+        ) {
             (Some(first), Some(last)) if self.performance_samples.len() >= 2 => {
                 let elapsed = (last.timestamp - first.timestamp).as_secs_f32();
                 if elapsed > 0.0 {
@@ -1673,7 +1856,9 @@ impl DemoApp {
             _ => current_fps,
         };
 
-        let worst_frame_ms_30s = self.performance_samples.iter()
+        let worst_frame_ms_30s = self
+            .performance_samples
+            .iter()
             .map(|s| s.frame_ms)
             .fold(0.0_f32, f32::max);
 
@@ -1698,12 +1883,36 @@ impl DemoApp {
         }
 
         let metrics = [
-            ("Frame", Color32::from_rgb(255, 99, 71), samples.iter().map(|s| s.frame_ms).collect::<Vec<_>>()),
-            ("Simulation", Color32::from_rgb(86, 204, 242), samples.iter().map(|s| s.simulation_ms).collect::<Vec<_>>()),
-            ("Render", Color32::from_rgb(242, 201, 76), samples.iter().map(|s| s.render_ms).collect::<Vec<_>>()),
-            ("UI", Color32::from_rgb(155, 81, 224), samples.iter().map(|s| s.ui_ms).collect::<Vec<_>>()),
-            ("Upload", Color32::from_rgb(39, 174, 96), samples.iter().map(|s| s.upload_ms).collect::<Vec<_>>()),
-            ("Tooltip", Color32::from_rgb(235, 87, 87), samples.iter().map(|s| s.tooltip_ms).collect::<Vec<_>>()),
+            (
+                "Frame",
+                Color32::from_rgb(255, 99, 71),
+                samples.iter().map(|s| s.frame_ms).collect::<Vec<_>>(),
+            ),
+            (
+                "Simulation",
+                Color32::from_rgb(86, 204, 242),
+                samples.iter().map(|s| s.simulation_ms).collect::<Vec<_>>(),
+            ),
+            (
+                "Render",
+                Color32::from_rgb(242, 201, 76),
+                samples.iter().map(|s| s.render_ms).collect::<Vec<_>>(),
+            ),
+            (
+                "UI",
+                Color32::from_rgb(155, 81, 224),
+                samples.iter().map(|s| s.ui_ms).collect::<Vec<_>>(),
+            ),
+            (
+                "Upload",
+                Color32::from_rgb(39, 174, 96),
+                samples.iter().map(|s| s.upload_ms).collect::<Vec<_>>(),
+            ),
+            (
+                "Tooltip",
+                Color32::from_rgb(235, 87, 87),
+                samples.iter().map(|s| s.tooltip_ms).collect::<Vec<_>>(),
+            ),
         ];
 
         egui::Area::new("performance_stats".into())
@@ -1711,16 +1920,27 @@ impl DemoApp {
             .show(ctx, |ui: &mut egui::Ui| {
                 Frame::none()
                     .fill(Color32::from_rgba_unmultiplied(8, 12, 18, 220))
-                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 24),
+                    ))
                     .inner_margin(Margin::same(12.0))
                     .show(ui, |ui: &mut egui::Ui| {
                         ui.set_min_width(240.0);
-                        ui.label(RichText::new("Performance").strong().size(18.0).color(Color32::WHITE));
+                        ui.label(
+                            RichText::new("Performance")
+                                .strong()
+                                .size(18.0)
+                                .color(Color32::WHITE),
+                        );
                         ui.add_space(6.0);
                         ui.label(format!("Frame: {:.2} ms", summary.current_frame_ms));
                         ui.label(format!("FPS: {:.1}", summary.current_fps));
                         ui.label(format!("Avg FPS (30s): {:.1}", summary.average_fps_30s));
-                        ui.label(format!("Worst Frame (30s): {:.2} ms", summary.worst_frame_ms_30s));
+                        ui.label(format!(
+                            "Worst Frame (30s): {:.2} ms",
+                            summary.worst_frame_ms_30s
+                        ));
                     });
             });
 
@@ -1732,7 +1952,10 @@ impl DemoApp {
 
                 Frame::none()
                     .fill(Color32::from_rgba_unmultiplied(7, 10, 15, 210))
-                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 24),
+                    ))
                     .inner_margin(Margin::same(12.0))
                     .show(ui, |ui: &mut egui::Ui| {
                         ui.horizontal_wrapped(|ui: &mut egui::Ui| {
@@ -1746,7 +1969,11 @@ impl DemoApp {
 
                         let (rect, _) = ui.allocate_exact_size(graph_size, Sense::hover());
                         let painter = ui.painter_at(rect);
-                        painter.rect_filled(rect, 10.0, Color32::from_rgba_unmultiplied(15, 21, 30, 200));
+                        painter.rect_filled(
+                            rect,
+                            10.0,
+                            Color32::from_rgba_unmultiplied(15, 21, 30, 200),
+                        );
                         painter.rect_stroke(
                             rect,
                             10.0,
@@ -1762,7 +1989,8 @@ impl DemoApp {
                             egui::pos2(rect.right() - right_pad, rect.bottom() - bottom_pad),
                         );
 
-                        let max_ms = metrics.iter()
+                        let max_ms = metrics
+                            .iter()
                             .flat_map(|(_, _, values)| values.iter().copied())
                             .fold(16.0_f32, f32::max)
                             .max(1.0);
@@ -1772,7 +2000,10 @@ impl DemoApp {
                             let y = egui::lerp(plot.bottom()..=plot.top(), t);
                             painter.line_segment(
                                 [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-                                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+                                Stroke::new(
+                                    1.0,
+                                    Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                                ),
                             );
                             let value = max_ms * t;
                             painter.text(
@@ -1787,14 +2018,19 @@ impl DemoApp {
                         if samples.len() >= 2 {
                             for (label, color, values) in &metrics {
                                 let _ = label;
-                                let points: Vec<_> = values.iter().enumerate().map(|(index, value)| {
-                                    let x_t = index as f32 / (values.len().saturating_sub(1) as f32);
-                                    let y_t = (*value / max_ms).clamp(0.0, 1.0);
-                                    egui::pos2(
-                                        egui::lerp(plot.left()..=plot.right(), x_t),
-                                        egui::lerp(plot.bottom()..=plot.top(), y_t),
-                                    )
-                                }).collect();
+                                let points: Vec<_> = values
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, value)| {
+                                        let x_t =
+                                            index as f32 / (values.len().saturating_sub(1) as f32);
+                                        let y_t = (*value / max_ms).clamp(0.0, 1.0);
+                                        egui::pos2(
+                                            egui::lerp(plot.left()..=plot.right(), x_t),
+                                            egui::lerp(plot.bottom()..=plot.top(), y_t),
+                                        )
+                                    })
+                                    .collect();
                                 painter.add(egui::Shape::line(points, Stroke::new(2.0, *color)));
                             }
                         }
@@ -1816,11 +2052,11 @@ impl DemoApp {
                     });
             });
     }
-    
+
     fn _update_tooltip_expensive(&mut self) {
         let sim = self.simulation.as_mut().unwrap();
         let (grid_w, grid_h) = sim.dimensions();
-        
+
         // Convert mouse position (logical coords) to grid coordinates
         if let Some(window) = &self.window {
             let size = window.inner_size();
@@ -1829,14 +2065,18 @@ impl DemoApp {
             let logical_h = size.height as f32 / scale;
             let grid_x = self.mouse_pos.0 * grid_w as f32 / logical_w;
             let grid_y = self.mouse_pos.1 * grid_h as f32 / logical_h;
-            
+
             match sim.inspect_with_mip(grid_x, grid_y, self.inspection_mip) {
                 Ok(result) => {
                     let new_tooltip = result.format_tooltip();
                     // Log when tooltip changes significantly
                     if new_tooltip != self.tooltip_text {
-                        log::debug!("Inspection at ({:.0}, {:.0}): {}", grid_x, grid_y, 
-                            new_tooltip.replace('\n', " | "));
+                        log::debug!(
+                            "Inspection at ({:.0}, {:.0}): {}",
+                            grid_x,
+                            grid_y,
+                            new_tooltip.replace('\n', " | ")
+                        );
                     }
                     self.tooltip_text = new_tooltip;
                     self.show_tooltip = true;
@@ -1850,18 +2090,17 @@ impl DemoApp {
     }
 
     fn render_frame(&mut self) -> Result<RenderFrameMetrics> {
-        let render_viewport = self.simulation_viewport()
-            .map(|viewport| RenderViewport {
-                x: viewport.physical_x,
-                y: viewport.physical_y,
-                width: viewport.physical_width,
-                height: viewport.physical_height,
-            });
+        let render_viewport = self.simulation_viewport().map(|viewport| RenderViewport {
+            x: viewport.physical_x,
+            y: viewport.physical_y,
+            width: viewport.physical_width,
+            height: viewport.physical_height,
+        });
         let ctx = self.render_ctx.as_mut().unwrap();
         let pipeline = self.render_pipeline.as_mut().unwrap();
         let sim = self.simulation.as_mut().unwrap();
         let egui = self.egui_renderer.as_mut().unwrap();
-        
+
         // Begin frame first - this waits on the in-flight fence,
         // ensuring the previous frame's commands have completed
         // before we touch the command pool or queue.
@@ -1877,52 +2116,61 @@ impl DemoApp {
         let t0 = Instant::now();
         pipeline.bind_simulation_buffers(ctx, sim.gpu_render_buffers());
         let t1 = Instant::now();
-        
+
         // Debug: Log frame presentation
         let step = sim.step_count();
         if step > 0 && step % 100 == 0 {
-            log::info!("Frame timing: bind={:.1}ms", 
-                (t1-t0).as_secs_f64()*1000.0);
+            log::info!(
+                "Frame timing: bind={:.1}ms",
+                (t1 - t0).as_secs_f64() * 1000.0
+            );
         }
 
         // Update egui textures before rendering
         egui.set_textures(ctx)?;
-        
+
         log::trace!("Rendering to swapchain image {}", image_index);
-        
+
         // Record commands
         let cmd = ctx.current_command_buffer();
-        
+
         let begin_info = ash::vk::CommandBufferBeginInfo::default();
         unsafe {
-            ctx.device.reset_command_buffer(cmd, ash::vk::CommandBufferResetFlags::empty())?;
+            ctx.device
+                .reset_command_buffer(cmd, ash::vk::CommandBufferResetFlags::empty())?;
             ctx.device.begin_command_buffer(cmd, &begin_info)?;
         }
 
         sim.record_render_barriers(cmd);
-        
+
         // Record fluid visualization (keeps render pass open)
-        let render_viewport = render_viewport
-            .unwrap_or_else(|| RenderViewport::fullscreen(ctx.swapchain_extent));
-        pipeline.record(ctx, cmd, image_index as usize, self.thermal_view, render_viewport);
-        
+        let render_viewport =
+            render_viewport.unwrap_or_else(|| RenderViewport::fullscreen(ctx.swapchain_extent));
+        pipeline.record(
+            ctx,
+            cmd,
+            image_index as usize,
+            self.thermal_view,
+            render_viewport,
+        );
+
         // Record egui draw commands inside the same render pass
         egui.cmd_draw(ctx, cmd, ctx.swapchain_extent)?;
-        
+
         // End render pass
         pipeline.end_render_pass(ctx, cmd);
-        
+
         unsafe {
             ctx.device.end_command_buffer(cmd)?;
         }
-        
+
         // End frame
         let ok = ctx.end_frame(image_index)?;
         if !ok {
             log::debug!("end_frame returned false, needs resize");
             self.needs_resize = true;
         }
-        
+
         // Free egui textures after rendering is complete
         egui.free_textures()?;
 
@@ -1937,11 +2185,11 @@ impl DemoApp {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        
+
         let ctx = self.render_ctx.as_mut().unwrap();
         ctx.recreate_swapchain(width, height)?;
         self.needs_resize = false;
-        
+
         Ok(())
     }
 }
@@ -1951,7 +2199,7 @@ impl ApplicationHandler for DemoApp {
         let window_attrs = Window::default_attributes()
             .with_title("Fluid Simulation Demo")
             .with_inner_size(PhysicalSize::new(1600, 1600));
-        
+
         match event_loop.create_window(window_attrs) {
             Ok(window) => {
                 if let Err(e) = self.initialize(window) {
@@ -1966,7 +2214,12 @@ impl ApplicationHandler for DemoApp {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
         let is_performance_toggle = matches!(
             &event,
             WindowEvent::KeyboardInput {
@@ -2004,7 +2257,7 @@ impl ApplicationHandler for DemoApp {
             event,
             WindowEvent::RedrawRequested | WindowEvent::Resized(_) | WindowEvent::CloseRequested
         );
-        
+
         if egui_wants_event && !is_critical_event {
             return;
         }
@@ -2013,7 +2266,7 @@ impl ApplicationHandler for DemoApp {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            
+
             WindowEvent::Resized(size) => {
                 if let Err(e) = self.handle_resize(size.width, size.height) {
                     log::error!("Failed to resize: {}", e);
@@ -2023,87 +2276,116 @@ impl ApplicationHandler for DemoApp {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
-            
-            WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Pressed, .. }, .. } => {
-                match logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        event_loop.exit();
-                    }
-                    Key::Named(NamedKey::Delete) => {
-                        self.delete_selected_entity();
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Character(ref c) if (c == "r" || c == "R") && !self.modifiers.shift_key() && (self.placement_state.is_some() || self.transform_state.is_some()) => {
-                        self.rotate_placement_entity();
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::Space) => {
-                        if let Some(sim) = &mut self.simulation {
-                            sim.toggle_pause();
-                            log::info!("Simulation {}", if sim.is_paused() { "paused" } else { "resumed" });
-                        }
-                    }
-                    Key::Character(ref c) if c == "+" || c == "=" => {
-                        self.inspection_mip = (self.inspection_mip * 2).min(64);
-                        if let Some(sim) = &mut self.simulation {
-                            sim.set_inspection_mip(self.inspection_mip);
-                        }
-                        log::info!("Inspection mip: {}", self.inspection_mip);
-                    }
-                    Key::Character(ref c) if c == "-" || c == "_" => {
-                        self.inspection_mip = (self.inspection_mip / 2).max(1);
-                        if let Some(sim) = &mut self.simulation {
-                            sim.set_inspection_mip(self.inspection_mip);
-                        }
-                        log::info!("Inspection mip: {}", self.inspection_mip);
-                    }
-                    Key::Character(ref c) if (c == "t" || c == "T") && self.selected_entity.is_some() => {
-                        self.begin_transform_selected_entity();
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Character(ref c) if c == "t" || c == "T" => {
-                        self.thermal_view = true;
-                    }
-                    _ => {}
-                }
-            }
-            
-            WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Released, .. }, .. } => {
-                match logical_key {
-                    Key::Character(ref c) if (c == "r" || c == "R") && self.modifiers.shift_key() => {
-                        if let Err(e) = self.reset_simulation() {
-                            log::error!("Failed to reset simulation: {}", e);
-                        }
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Character(ref c) if c == "t" || c == "T" => {
-                        self.thermal_view = false;
-                    }
-                    _ => {}
-                }
-            }
 
-            WindowEvent::MouseInput { button: MouseButton::Left, state: ElementState::Released, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key,
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => match logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    event_loop.exit();
+                }
+                Key::Named(NamedKey::Delete) => {
+                    self.delete_selected_entity();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                Key::Character(ref c)
+                    if (c == "r" || c == "R")
+                        && !self.modifiers.shift_key()
+                        && (self.placement_state.is_some() || self.transform_state.is_some()) =>
+                {
+                    self.rotate_placement_entity();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                Key::Named(NamedKey::Space) => {
+                    if let Some(sim) = &mut self.simulation {
+                        sim.toggle_pause();
+                        log::info!(
+                            "Simulation {}",
+                            if sim.is_paused() { "paused" } else { "resumed" }
+                        );
+                    }
+                }
+                Key::Character(ref c) if c == "+" || c == "=" => {
+                    self.inspection_mip = (self.inspection_mip * 2).min(64);
+                    if let Some(sim) = &mut self.simulation {
+                        sim.set_inspection_mip(self.inspection_mip);
+                    }
+                    log::info!("Inspection mip: {}", self.inspection_mip);
+                }
+                Key::Character(ref c) if c == "-" || c == "_" => {
+                    self.inspection_mip = (self.inspection_mip / 2).max(1);
+                    if let Some(sim) = &mut self.simulation {
+                        sim.set_inspection_mip(self.inspection_mip);
+                    }
+                    log::info!("Inspection mip: {}", self.inspection_mip);
+                }
+                Key::Character(ref c)
+                    if (c == "t" || c == "T") && self.selected_entity.is_some() =>
+                {
+                    self.begin_transform_selected_entity();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                Key::Character(ref c) if c == "t" || c == "T" => {
+                    self.thermal_view = true;
+                }
+                _ => {}
+            },
+
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key,
+                        state: ElementState::Released,
+                        ..
+                    },
+                ..
+            } => match logical_key {
+                Key::Character(ref c) if (c == "r" || c == "R") && self.modifiers.shift_key() => {
+                    if let Err(e) = self.reset_simulation() {
+                        log::error!("Failed to reset simulation: {}", e);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                Key::Character(ref c) if c == "t" || c == "T" => {
+                    self.thermal_view = false;
+                }
+                _ => {}
+            },
+
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state: ElementState::Released,
+                ..
+            } => {
                 self.handle_primary_click();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
-            
+
             WindowEvent::CursorMoved { position, .. } => {
                 // Store position in logical coordinates for egui
-                let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor())
+                    .unwrap_or(1.0) as f32;
                 self.mouse_pos = (position.x as f32 / scale, position.y as f32 / scale);
             }
-            
+
             WindowEvent::RedrawRequested => {
                 let frame_start = Instant::now();
                 let dt = frame_start.duration_since(self.last_frame);
@@ -2115,7 +2397,7 @@ impl ApplicationHandler for DemoApp {
                     }
                 }
                 let t1 = Instant::now();
-                
+
                 // Update tooltip
                 self.update_tooltip();
                 self.update_detail_probes();
@@ -2123,13 +2405,14 @@ impl ApplicationHandler for DemoApp {
 
                 let performance_overlay = self.performance_overlay;
                 let performance_summary = self.performance_summary();
-                let performance_samples: Vec<_> = self.performance_samples.iter().copied().collect();
+                let performance_samples: Vec<_> =
+                    self.performance_samples.iter().copied().collect();
                 let hovered_coarse_rect = self.hovered_coarse_rect();
                 let mut leak_channel_overlays = self.leak_channel_overlays();
                 if let Some(ghost) = self.placement_overlay() {
                     leak_channel_overlays.push(ghost);
                 }
-                
+
                 // Render egui overlay (not actually rendered to screen)
                 if self.egui_renderer.is_some() && self.window.is_some() {
                     {
@@ -2149,7 +2432,7 @@ impl ApplicationHandler for DemoApp {
                     self.draw_enzymes(&egui_ctx);
                     Self::draw_leak_channels(&egui_ctx, &leak_channel_overlays);
                     self.draw_detail_probes(&egui_ctx);
-                    
+
                     // Show tooltip near mouse
                     if self.show_tooltip {
                         egui::Window::new("Inspection")
@@ -2176,7 +2459,7 @@ impl ApplicationHandler for DemoApp {
                     let _output = egui.end_frame(window);
                 }
                 let t3 = Instant::now();
-                
+
                 // Render simulation
                 if self.needs_resize {
                     if let Some(window) = &self.window {
@@ -2186,7 +2469,7 @@ impl ApplicationHandler for DemoApp {
                         }
                     }
                 }
-                
+
                 let render_metrics = match self.render_frame() {
                     Ok(metrics) => metrics,
                     Err(e) => {
@@ -2205,24 +2488,26 @@ impl ApplicationHandler for DemoApp {
                     render_ms: render_metrics.render_ms,
                     upload_ms: render_metrics.upload_ms,
                 });
-                
+
                 // Log step count periodically
                 if let Some(sim) = &self.simulation {
                     if sim.step_count() > 0 && sim.step_count() % 100 == 0 {
-                        log::info!("Step {}: sim={:.1}ms tooltip={:.1}ms egui={:.1}ms render={:.1}ms total={:.1}ms",
+                        log::info!(
+                            "Step {}: sim={:.1}ms tooltip={:.1}ms egui={:.1}ms render={:.1}ms total={:.1}ms",
                             sim.step_count(),
-                            (t1-t0).as_secs_f64()*1000.0,
-                            (t2-t1).as_secs_f64()*1000.0,
-                            (t3-t2).as_secs_f64()*1000.0,
-                            (t4-t3).as_secs_f64()*1000.0,
-                            (t4-frame_start).as_secs_f64()*1000.0);
+                            (t1 - t0).as_secs_f64() * 1000.0,
+                            (t2 - t1).as_secs_f64() * 1000.0,
+                            (t3 - t2).as_secs_f64() * 1000.0,
+                            (t4 - t3).as_secs_f64() * 1000.0,
+                            (t4 - frame_start).as_secs_f64() * 1000.0
+                        );
                     }
                 }
-                
+
                 // Update timing
                 self.frame_count += 1;
                 self.last_frame = frame_start;
-                
+
                 // Update FPS counter
                 let fps_elapsed = frame_start.duration_since(self.fps_update_time);
                 if fps_elapsed >= Duration::from_secs(1) {
@@ -2230,7 +2515,7 @@ impl ApplicationHandler for DemoApp {
                     self.frame_count = 0;
                     self.fps_update_time = frame_start;
                 }
-                
+
                 // Exit after 5 frames in smoke-test mode
                 if self.smoke_test && self.frame_count >= 5 {
                     log::info!("Smoke test: 5 frames rendered, exiting");
@@ -2243,7 +2528,7 @@ impl ApplicationHandler for DemoApp {
                     window.request_redraw();
                 }
             }
-            
+
             _ => {}
         }
     }
@@ -2260,25 +2545,27 @@ impl Drop for DemoApp {
 
         // Keep the window and render context alive while GPU-backed resources are released.
         if let Some(ctx) = &render_ctx {
-            unsafe { ctx.device.device_wait_idle().ok(); }
+            unsafe {
+                ctx.device.device_wait_idle().ok();
+            }
         }
         log::info!("DemoApp::drop - GPU idle");
-        
+
         // Drop simulation first; in shared-context mode it borrows the renderer's device/allocator.
         drop(simulation);
         log::info!("DemoApp::drop - simulation dropped");
-        
+
         // Drop egui renderer before tearing down the render context.
         drop(egui_renderer);
         log::info!("DemoApp::drop - egui_renderer dropped");
-        
+
         // Clean up the render pipeline while the render context is still alive.
         if let (Some(pipeline), Some(ctx)) = (render_pipeline.as_mut(), render_ctx.as_ref()) {
             log::info!("Cleaning up render pipeline...");
             pipeline.destroy(ctx);
         }
         log::info!("DemoApp::drop - pipeline destroyed");
-        
+
         drop(render_pipeline);
         drop(render_ctx.take());
         drop(window);
@@ -2292,54 +2579,65 @@ fn compute_species_colors(registry: &fluidsim::SpeciesRegistry) -> Vec<[f32; 4]>
 
     // Explicit color assignments for known species (RGB, visually distinct from water blue)
     let overrides: HashMap<&str, [f32; 3]> = HashMap::from([
-        ("Na+", [1.0, 0.22, 0.08]),     // Hot orange-red
-        ("K+",  [0.12, 0.92, 0.22]),    // Electric green
-        ("Cl-", [1.0, 0.86, 0.08]),     // Acid yellow
-        ("H+",  [1.0, 0.14, 0.58]),     // Magenta
-        ("OH-", [0.38, 0.18, 1.0]),     // Vivid violet
-        ("Ca2+",[1.0, 0.52, 0.06]),     // Burning orange
-        ("SO4(2-)", [0.05, 0.82, 0.92]),// Bright cyan
+        ("Na+", [1.0, 0.22, 0.08]),      // Hot orange-red
+        ("K+", [0.12, 0.92, 0.22]),      // Electric green
+        ("Cl-", [1.0, 0.86, 0.08]),      // Acid yellow
+        ("H+", [1.0, 0.14, 0.58]),       // Magenta
+        ("OH-", [0.38, 0.18, 1.0]),      // Vivid violet
+        ("Ca2+", [1.0, 0.52, 0.06]),     // Burning orange
+        ("SO4(2-)", [0.05, 0.82, 0.92]), // Bright cyan
         ("CH3COOH", [0.22, 0.95, 0.66]), // Neon mint
-        ("CH3COO-", [1.0, 0.62, 0.12]), // Amber
+        ("CH3COO-", [1.0, 0.62, 0.12]),  // Amber
     ]);
 
-    registry.iter().map(|info| {
-        if let Some(&rgb) = overrides.get(info.name.as_ref()) {
-            [rgb[0], rgb[1], rgb[2], 1.0]
-        } else {
-            // Hash-based fallback: golden ratio distribution, avoid water-blue hue
-            let mut h = (info.index as f32 * 0.618033988749895).fract();
-            for _ in 0..8 {
-                let dist = (h - 0.54).abs().min(1.0 - (h - 0.54).abs());
-                if dist >= 0.12 { break; }
-                h = (h + 0.17).fract();
+    registry
+        .iter()
+        .map(|info| {
+            if let Some(&rgb) = overrides.get(info.name.as_ref()) {
+                [rgb[0], rgb[1], rgb[2], 1.0]
+            } else {
+                // Hash-based fallback: golden ratio distribution, avoid water-blue hue
+                let mut h = (info.index as f32 * 0.618033988749895).fract();
+                for _ in 0..8 {
+                    let dist = (h - 0.54).abs().min(1.0 - (h - 0.54).abs());
+                    if dist >= 0.12 {
+                        break;
+                    }
+                    h = (h + 0.17).fract();
+                }
+                let rgb = hue_to_rgb(h);
+                let r = 0.5 + (rgb[0] - 0.5) * 1.1;
+                let g = 0.5 + (rgb[1] - 0.5) * 1.1;
+                let b = 0.5 + (rgb[2] - 0.5) * 1.1;
+                [r, g, b, 1.0]
             }
-            let rgb = hue_to_rgb(h);
-            let r = 0.5 + (rgb[0] - 0.5) * 1.1;
-            let g = 0.5 + (rgb[1] - 0.5) * 1.1;
-            let b = 0.5 + (rgb[2] - 0.5) * 1.1;
-            [r, g, b, 1.0]
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Convert hue (0..1) to RGB.
 fn hue_to_rgb(h: f32) -> [f32; 3] {
     let hue = h * 6.0;
     let x = 1.0 - (hue % 2.0 - 1.0).abs();
-    if hue < 1.0 { [1.0, x, 0.0] }
-    else if hue < 2.0 { [x, 1.0, 0.0] }
-    else if hue < 3.0 { [0.0, 1.0, x] }
-    else if hue < 4.0 { [0.0, x, 1.0] }
-    else if hue < 5.0 { [x, 0.0, 1.0] }
-    else { [1.0, 0.0, x] }
+    if hue < 1.0 {
+        [1.0, x, 0.0]
+    } else if hue < 2.0 {
+        [x, 1.0, 0.0]
+    } else if hue < 3.0 {
+        [0.0, 1.0, x]
+    } else if hue < 4.0 {
+        [0.0, x, 1.0]
+    } else if hue < 5.0 {
+        [x, 0.0, 1.0]
+    } else {
+        [1.0, 0.0, x]
+    }
 }
 
 fn main() -> Result<()> {
     // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .init();
-    
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let cli = Cli::parse();
 
     let scenario = match cli.command {
@@ -2357,7 +2655,7 @@ fn main() -> Result<()> {
     log::info!("  Space: Toggle pause");
     log::info!("  +/-: Adjust inspection mip");
     log::info!("  Escape: Exit");
-    
+
     if cli.smoke_test {
         log::info!("Running in smoke-test mode (5 frames then exit)");
     }
@@ -2368,7 +2666,7 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    
+
     let mut app = DemoApp::new(
         cli.smoke_test,
         scenario,
@@ -2376,6 +2674,6 @@ fn main() -> Result<()> {
         cli.present_mode.into(),
     );
     event_loop.run_app(&mut app)?;
-    
+
     Ok(())
 }

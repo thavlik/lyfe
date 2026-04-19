@@ -20,8 +20,8 @@
 use anyhow::{Context, Result, bail};
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
-use gpu_allocator::vulkan::{Allocator, AllocationCreateDesc, AllocationScheme, Allocation};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use parking_lot::Mutex;
 
 use std::sync::Arc;
@@ -139,10 +139,10 @@ pub struct GpuReactionRule {
     pub catalyst_index: u32,
     pub kinetic_model: u32,
     pub effective_rate_bits: u32, // f32 bit-cast for mass action k or Michaelis-Menten kcat*scale
-    pub km_reactant_a_bits: u32, // f32 bit-cast, 0 for mass action
-    pub km_reactant_b_bits: u32, // f32 bit-cast, 0 when unused
+    pub km_reactant_a_bits: u32,  // f32 bit-cast, 0 for mass action
+    pub km_reactant_b_bits: u32,  // f32 bit-cast, 0 when unused
     pub enthalpy_delta_bits: u32, // f32 bit-cast
-    pub entropy_delta_bits: u32, // f32 bit-cast
+    pub entropy_delta_bits: u32,  // f32 bit-cast
 }
 
 #[repr(C)]
@@ -294,13 +294,19 @@ impl GpuBuffer {
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
         }
 
-        Ok(Self { buffer, allocation, size })
+        Ok(Self {
+            buffer,
+            allocation,
+            size,
+        })
     }
 
     /// Write data to a CPU-visible buffer.
     pub fn write<T: Pod>(&mut self, data: &[T]) -> Result<()> {
         let bytes = bytemuck::cast_slice(data);
-        let mapped = self.allocation.mapped_slice_mut()
+        let mapped = self
+            .allocation
+            .mapped_slice_mut()
             .context("Buffer not mapped for CPU access")?;
         mapped[..bytes.len()].copy_from_slice(bytes);
         Ok(())
@@ -308,7 +314,9 @@ impl GpuBuffer {
 
     /// Read data from a CPU-visible buffer.
     pub fn read<T: Pod + Clone>(&self, count: usize) -> Result<Vec<T>> {
-        let mapped = self.allocation.mapped_slice()
+        let mapped = self
+            .allocation
+            .mapped_slice()
             .context("Buffer not mapped for CPU access")?;
         let bytes = &mapped[..count * std::mem::size_of::<T>()];
         Ok(bytemuck::cast_slice(bytes).to_vec())
@@ -351,7 +359,7 @@ pub struct GpuSimulation {
 
     // Staging buffer for uploads (CpuToGpu)
     pub staging_buffer: GpuBuffer,
-    
+
     // Readback buffer for downloads (GpuToCpu)
     pub readback_buffer: GpuBuffer,
 
@@ -371,7 +379,7 @@ pub struct GpuSimulation {
     pub command_pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
     pub fence: vk::Fence,
-    
+
     // Coarse grid for async tooltip readback
     pub coarse_grid: Option<CoarseGrid>,
 
@@ -389,13 +397,19 @@ impl GpuSimulation {
         solid_mask: &[u32],
     ) -> Result<Vec<GpuLeakChannel>> {
         if channels.len() > MAX_LEAK_CHANNELS {
-            bail!("Too many leak channels: {} > {}", channels.len(), MAX_LEAK_CHANNELS);
+            bail!(
+                "Too many leak channels: {} > {}",
+                channels.len(),
+                MAX_LEAK_CHANNELS
+            );
         }
 
         let mut packed_channels = Vec::with_capacity(channels.len());
         for channel in channels {
-            let species_index = species_registry.index_of(channel.species)
-                .context("Leak channel species is not registered in this scenario")? as u32;
+            let species_index = species_registry
+                .index_of(channel.species)
+                .context("Leak channel species is not registered in this scenario")?
+                as u32;
             let ((sink_x, sink_y), (source_x, source_y)) = channel
                 .resolve_endpoints(self.width, self.height, solid_mask)
                 .context("Leak channel does not resolve to valid fluid endpoints")?;
@@ -421,37 +435,48 @@ impl GpuSimulation {
         species_registry: &SpeciesRegistry,
     ) -> Result<Vec<GpuEnzymeEntity>> {
         if entities.len() > MAX_ENZYME_ENTITIES {
-            bail!("Too many enzyme entities: {} > {}", entities.len(), MAX_ENZYME_ENTITIES);
+            bail!(
+                "Too many enzyme entities: {} > {}",
+                entities.len(),
+                MAX_ENZYME_ENTITIES
+            );
         }
 
-        let glucose_index = species_registry.index_of_name("Glucose")
+        let glucose_index = species_registry
+            .index_of_name("Glucose")
             .context("Enzyme scenario is missing Glucose")? as u32;
-        let atp_index = species_registry.index_of_name("ATP")
+        let atp_index = species_registry
+            .index_of_name("ATP")
             .context("Enzyme scenario is missing ATP")? as u32;
-        let g6p_index = species_registry.index_of_name("G6P")
+        let g6p_index = species_registry
+            .index_of_name("G6P")
             .context("Enzyme scenario is missing G6P")? as u32;
-        let adp_index = species_registry.index_of_name("ADP")
+        let adp_index = species_registry
+            .index_of_name("ADP")
             .context("Enzyme scenario is missing ADP")? as u32;
 
-        Ok(entities.iter().map(|entity| {
-            let (active_site_x, active_site_y) = entity.active_site_cell();
-            GpuEnzymeEntity {
-                active_site_x,
-                active_site_y,
-                glucose_index,
-                atp_index,
-                g6p_index,
-                adp_index,
-                catalytic_scale: entity.catalytic_scale,
-                thermal_bias: entity.thermal_bias,
-                km_glucose: 0.12,
-                km_atp: 0.08,
-            }
-        }).collect())
+        Ok(entities
+            .iter()
+            .map(|entity| {
+                let (active_site_x, active_site_y) = entity.active_site_cell();
+                GpuEnzymeEntity {
+                    active_site_x,
+                    active_site_y,
+                    glucose_index,
+                    atp_index,
+                    g6p_index,
+                    adp_index,
+                    catalytic_scale: entity.catalytic_scale,
+                    thermal_bias: entity.thermal_bias,
+                    km_glucose: 0.12,
+                    km_atp: 0.08,
+                }
+            })
+            .collect())
     }
 
     /// Create a new GPU simulation context.
-    /// 
+    ///
     /// This creates a Vulkan instance and device suitable for compute-only
     /// workloads.
     pub fn new(
@@ -519,8 +544,7 @@ impl GpuSimulation {
             .engine_version(vk::make_api_version(0, 1, 0, 0))
             .api_version(vk::API_VERSION_1_2);
 
-        let instance_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info);
+        let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
 
         let instance = unsafe { entry.create_instance(&instance_info, None)? };
 
@@ -529,7 +553,8 @@ impl GpuSimulation {
             bail!("No Vulkan-capable GPU found");
         }
 
-        let physical_device = physical_devices.into_iter()
+        let physical_device = physical_devices
+            .into_iter()
             .max_by_key(|&pd| {
                 let props = unsafe { instance.get_physical_device_properties(pd) };
                 match props.device_type {
@@ -541,17 +566,20 @@ impl GpuSimulation {
             })
             .unwrap();
 
-        let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-        let compute_queue_family = queue_families.iter()
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let compute_queue_family = queue_families
+            .iter()
             .enumerate()
             .find_map(|(index, qf)| {
                 (qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
                     && qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                    .then_some(index as u32)
+                .then_some(index as u32)
             })
             .or_else(|| {
                 queue_families.iter().enumerate().find_map(|(index, qf)| {
-                    qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                    qf.queue_flags
+                        .contains(vk::QueueFlags::COMPUTE)
                         .then_some(index as u32)
                 })
             })
@@ -562,8 +590,8 @@ impl GpuSimulation {
             .queue_family_index(compute_queue_family)
             .queue_priorities(&queue_priority);
 
-        let device_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(std::slice::from_ref(&queue_info));
+        let device_info =
+            vk::DeviceCreateInfo::default().queue_create_infos(std::slice::from_ref(&queue_info));
 
         let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
         let queue = unsafe { device.get_device_queue(compute_queue_family, 0) };
@@ -606,24 +634,49 @@ impl GpuSimulation {
         let cell_count = (width * height) as usize;
 
         if initial_concentrations.len() != species_count {
-            bail!("Expected {} species, got {}", species_count, initial_concentrations.len());
+            bail!(
+                "Expected {} species, got {}",
+                species_count,
+                initial_concentrations.len()
+            );
         }
         for (i, conc) in initial_concentrations.iter().enumerate() {
             if conc.len() != cell_count {
-                bail!("Species {} has {} cells, expected {}", i, conc.len(), cell_count);
+                bail!(
+                    "Species {} has {} cells, expected {}",
+                    i,
+                    conc.len(),
+                    cell_count
+                );
             }
         }
         if solid_mask_data.len() != cell_count {
-            bail!("Solid mask has {} cells, expected {}", solid_mask_data.len(), cell_count);
+            bail!(
+                "Solid mask has {} cells, expected {}",
+                solid_mask_data.len(),
+                cell_count
+            );
         }
         if material_ids_data.len() != cell_count {
-            bail!("Material IDs has {} cells, expected {}", material_ids_data.len(), cell_count);
+            bail!(
+                "Material IDs has {} cells, expected {}",
+                material_ids_data.len(),
+                cell_count
+            );
         }
         if diffusion_coeffs_data.len() != species_count {
-            bail!("Diffusion coeffs has {} entries, expected {}", diffusion_coeffs_data.len(), species_count);
+            bail!(
+                "Diffusion coeffs has {} entries, expected {}",
+                diffusion_coeffs_data.len(),
+                species_count
+            );
         }
         if species_charges_data.len() != species_count {
-            bail!("Species charges has {} entries, expected {}", species_charges_data.len(), species_count);
+            bail!(
+                "Species charges has {} entries, expected {}",
+                species_charges_data.len(),
+                species_count
+            );
         }
 
         let SharedGpuContext {
@@ -646,7 +699,9 @@ impl GpuSimulation {
             &device,
             &mut alloc,
             conc_buffer_size,
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuOnly,
             "conc_buffer_a",
         )?;
@@ -655,7 +710,9 @@ impl GpuSimulation {
             &device,
             &mut alloc,
             conc_buffer_size,
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuOnly,
             "conc_buffer_b",
         )?;
@@ -696,7 +753,9 @@ impl GpuSimulation {
             "species_charges",
         )?;
 
-        let staging_size = conc_buffer_size.max(mask_buffer_size).max(charges_buffer_size);
+        let staging_size = conc_buffer_size
+            .max(mask_buffer_size)
+            .max(charges_buffer_size);
         let mut staging_buffer = GpuBuffer::new(
             &device,
             &mut alloc,
@@ -737,19 +796,64 @@ impl GpuSimulation {
         }
 
         staging_buffer.write(&flat_conc)?;
-        Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, conc_buffer_a.buffer, conc_buffer_size, Some(command_buffer))?;
+        Self::copy_buffer_sync(
+            &device,
+            command_pool,
+            compute_queue,
+            fence,
+            staging_buffer.buffer,
+            conc_buffer_a.buffer,
+            conc_buffer_size,
+            Some(command_buffer),
+        )?;
 
         staging_buffer.write(solid_mask_data)?;
-        Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, solid_mask.buffer, mask_buffer_size, Some(command_buffer))?;
+        Self::copy_buffer_sync(
+            &device,
+            command_pool,
+            compute_queue,
+            fence,
+            staging_buffer.buffer,
+            solid_mask.buffer,
+            mask_buffer_size,
+            Some(command_buffer),
+        )?;
 
         staging_buffer.write(material_ids_data)?;
-        Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, material_ids.buffer, mask_buffer_size, Some(command_buffer))?;
+        Self::copy_buffer_sync(
+            &device,
+            command_pool,
+            compute_queue,
+            fence,
+            staging_buffer.buffer,
+            material_ids.buffer,
+            mask_buffer_size,
+            Some(command_buffer),
+        )?;
 
         staging_buffer.write(diffusion_coeffs_data)?;
-        Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, diffusion_coeffs.buffer, coeffs_buffer_size, Some(command_buffer))?;
+        Self::copy_buffer_sync(
+            &device,
+            command_pool,
+            compute_queue,
+            fence,
+            staging_buffer.buffer,
+            diffusion_coeffs.buffer,
+            coeffs_buffer_size,
+            Some(command_buffer),
+        )?;
 
         staging_buffer.write(species_charges_data)?;
-        Self::copy_buffer_sync(&device, command_pool, compute_queue, fence, staging_buffer.buffer, species_charges.buffer, charges_buffer_size, Some(command_buffer))?;
+        Self::copy_buffer_sync(
+            &device,
+            command_pool,
+            compute_queue,
+            fence,
+            staging_buffer.buffer,
+            species_charges.buffer,
+            charges_buffer_size,
+            Some(command_buffer),
+        )?;
 
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
@@ -779,9 +883,9 @@ impl GpuSimulation {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&bindings);
-        let descriptor_set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
 
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -791,24 +895,30 @@ impl GpuSimulation {
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(std::slice::from_ref(&descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-        let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
+        let pipeline_layout =
+            unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
         let shader_source = include_str!("../shaders/diffusion.comp");
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
-        let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
-        options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+        let mut options =
+            shaderc::CompileOptions::new().context("Failed to create compile options")?;
+        options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_2 as u32,
+        );
         options.set_optimization_level(shaderc::OptimizationLevel::Performance);
 
-        let spirv = compiler.compile_into_spirv(
-            shader_source,
-            shaderc::ShaderKind::Compute,
-            "diffusion.comp",
-            "main",
-            Some(&options),
-        ).context("Failed to compile diffusion shader")?;
+        let spirv = compiler
+            .compile_into_spirv(
+                shader_source,
+                shaderc::ShaderKind::Compute,
+                "diffusion.comp",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile diffusion shader")?;
 
-        let shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(spirv.as_binary());
+        let shader_module_info = vk::ShaderModuleCreateInfo::default().code(spirv.as_binary());
         let shader_module = unsafe { device.create_shader_module(&shader_module_info, None)? };
 
         let entry_name = c"main";
@@ -822,7 +932,8 @@ impl GpuSimulation {
             .layout(pipeline_layout);
 
         let diffusion_pipeline = unsafe {
-            device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
                 .map_err(|e| anyhow::anyhow!("Failed to create compute pipeline: {:?}", e.1))?[0]
         };
 
@@ -846,11 +957,10 @@ impl GpuSimulation {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
-        let charge_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&charge_bindings);
-        let charge_descriptor_set_layout = unsafe {
-            device.create_descriptor_set_layout(&charge_layout_info, None)?
-        };
+        let charge_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&charge_bindings);
+        let charge_descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&charge_layout_info, None)? };
 
         let charge_push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -860,21 +970,23 @@ impl GpuSimulation {
         let charge_pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(std::slice::from_ref(&charge_descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&charge_push_constant_range));
-        let charge_pipeline_layout = unsafe {
-            device.create_pipeline_layout(&charge_pipeline_layout_info, None)?
-        };
+        let charge_pipeline_layout =
+            unsafe { device.create_pipeline_layout(&charge_pipeline_layout_info, None)? };
 
-        let charge_spirv = compiler.compile_into_spirv(
-            include_str!("../shaders/charge_projection.comp"),
-            shaderc::ShaderKind::Compute,
-            "charge_projection.comp",
-            "main",
-            Some(&options),
-        ).context("Failed to compile charge projection shader")?;
+        let charge_spirv = compiler
+            .compile_into_spirv(
+                include_str!("../shaders/charge_projection.comp"),
+                shaderc::ShaderKind::Compute,
+                "charge_projection.comp",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile charge projection shader")?;
 
-        let charge_shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(charge_spirv.as_binary());
-        let charge_shader_module = unsafe { device.create_shader_module(&charge_shader_module_info, None)? };
+        let charge_shader_module_info =
+            vk::ShaderModuleCreateInfo::default().code(charge_spirv.as_binary());
+        let charge_shader_module =
+            unsafe { device.create_shader_module(&charge_shader_module_info, None)? };
 
         let charge_stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -886,17 +998,18 @@ impl GpuSimulation {
             .layout(charge_pipeline_layout);
 
         let charge_projection_pipeline = unsafe {
-            device.create_compute_pipelines(vk::PipelineCache::null(), &[charge_pipeline_info], None)
-                .map_err(|e| anyhow::anyhow!("Failed to create charge projection pipeline: {:?}", e.1))?[0]
+            device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[charge_pipeline_info], None)
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create charge projection pipeline: {:?}", e.1)
+                })?[0]
         };
 
         unsafe { device.destroy_shader_module(charge_shader_module, None) };
 
-        let pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(10),
-        ];
+        let pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(10)];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(2)
@@ -909,21 +1022,21 @@ impl GpuSimulation {
             .set_layouts(&layouts);
         let descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info)? };
 
-        let charge_pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(6),
-        ];
+        let charge_pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(6)];
         let charge_pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(2)
             .pool_sizes(&charge_pool_sizes);
-        let charge_descriptor_pool = unsafe { device.create_descriptor_pool(&charge_pool_info, None)? };
+        let charge_descriptor_pool =
+            unsafe { device.create_descriptor_pool(&charge_pool_info, None)? };
 
         let charge_layouts = [charge_descriptor_set_layout, charge_descriptor_set_layout];
         let charge_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(charge_descriptor_pool)
             .set_layouts(&charge_layouts);
-        let charge_descriptor_sets = unsafe { device.allocate_descriptor_sets(&charge_alloc_info)? };
+        let charge_descriptor_sets =
+            unsafe { device.allocate_descriptor_sets(&charge_alloc_info)? };
 
         Self::update_descriptor_set(
             &device,
@@ -1047,15 +1160,13 @@ impl GpuSimulation {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe { device.begin_command_buffer(cmd, &begin_info)? };
 
-        let copy_region = vk::BufferCopy::default()
-            .size(size);
+        let copy_region = vk::BufferCopy::default().size(size);
         unsafe { device.cmd_copy_buffer(cmd, src, dst, &[copy_region]) };
 
         unsafe { device.end_command_buffer(cmd)? };
 
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&cmd));
-        
+        let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+
         unsafe {
             device.reset_fences(&[fence])?;
             device.queue_submit(queue, &[submit_info], fence)?;
@@ -1119,8 +1230,7 @@ impl GpuSimulation {
         unsafe { device.cmd_copy_buffer(cmd, src, dst, &[copy_region]) };
         unsafe { device.end_command_buffer(cmd)? };
 
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&cmd));
+        let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
 
         unsafe {
             device.reset_fences(&[fence])?;
@@ -1243,7 +1353,10 @@ impl GpuSimulation {
         unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
-    fn reaction_descriptor_index(conc_current_buffer: usize, temperature_current_buffer: usize) -> usize {
+    fn reaction_descriptor_index(
+        conc_current_buffer: usize,
+        temperature_current_buffer: usize,
+    ) -> usize {
         conc_current_buffer * 2 + temperature_current_buffer
     }
 
@@ -1477,7 +1590,11 @@ impl GpuSimulation {
         push_constants: &DiffusionPushConstants,
     ) {
         unsafe {
-            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.diffusion_pipeline);
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.diffusion_pipeline,
+            );
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1496,7 +1613,8 @@ impl GpuSimulation {
 
             let workgroup_size = 256u32;
             let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
-            self.device.cmd_dispatch(cmd, num_groups, self.species_count as u32, 1);
+            self.device
+                .cmd_dispatch(cmd, num_groups, self.species_count as u32, 1);
         }
     }
 
@@ -1508,7 +1626,8 @@ impl GpuSimulation {
         push_constants: &LeakPushConstants,
     ) {
         unsafe {
-            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, leak.leak_pipeline);
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, leak.leak_pipeline);
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1539,7 +1658,11 @@ impl GpuSimulation {
         push_constants: &EnzymePushConstants,
     ) {
         unsafe {
-            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, enzyme.enzyme_pipeline);
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                enzyme.enzyme_pipeline,
+            );
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1569,7 +1692,11 @@ impl GpuSimulation {
         push_constants: &ChargeProjectionPushConstants,
     ) {
         unsafe {
-            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.charge_projection_pipeline);
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.charge_projection_pipeline,
+            );
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1600,7 +1727,11 @@ impl GpuSimulation {
         push_constants: &ReactionPushConstants,
     ) {
         unsafe {
-            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, rxn.reaction_pipeline);
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                rxn.reaction_pipeline,
+            );
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1631,7 +1762,11 @@ impl GpuSimulation {
         push_constants: &ThermalPushConstants,
     ) {
         unsafe {
-            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, rxn.thermal_pipeline);
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                rxn.thermal_pipeline,
+            );
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1681,7 +1816,9 @@ impl GpuSimulation {
             reaction_dt
         };
 
-        let mut temperature_current_buffer = self.reaction.as_ref()
+        let mut temperature_current_buffer = self
+            .reaction
+            .as_ref()
             .map(|rxn| rxn.temperature_current_buffer)
             .unwrap_or(0);
 
@@ -1715,9 +1852,14 @@ impl GpuSimulation {
         if let Some(rxn) = self.reaction.as_ref() {
             input_barriers.push(
                 vk::BufferMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                    .src_access_mask(
+                        vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE,
+                    )
                     .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
-                    .buffer(Self::temperature_buffer_handle(rxn, temperature_current_buffer))
+                    .buffer(Self::temperature_buffer_handle(
+                        rxn,
+                        temperature_current_buffer,
+                    ))
                     .offset(0)
                     .size(vk::WHOLE_SIZE),
             );
@@ -1790,9 +1932,11 @@ impl GpuSimulation {
                     dt: reaction_substep_dt,
                     _pad: [0; 3],
                 };
-                let reaction_descriptor_set = rxn.reaction_descriptor_sets[
-                    Self::reaction_descriptor_index(self.current_buffer, temperature_current_buffer)
-                ];
+                let reaction_descriptor_set = rxn.reaction_descriptor_sets
+                    [Self::reaction_descriptor_index(
+                        self.current_buffer,
+                        temperature_current_buffer,
+                    )];
                 self.record_reaction_dispatch(cmd, rxn, reaction_descriptor_set, &reaction_push);
                 self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
                 self.record_compute_buffer_barrier(
@@ -1807,7 +1951,8 @@ impl GpuSimulation {
                     dt: substep_dt,
                     _pad: [0; 2],
                 };
-                let thermal_descriptor_set = rxn.thermal_descriptor_sets[temperature_current_buffer];
+                let thermal_descriptor_set =
+                    rxn.thermal_descriptor_sets[temperature_current_buffer];
                 self.record_temperature_dispatch(cmd, rxn, thermal_descriptor_set, &thermal_push);
                 temperature_current_buffer = 1 - temperature_current_buffer;
                 self.record_compute_buffer_barrier(
@@ -1828,7 +1973,10 @@ impl GpuSimulation {
                     };
                     let leak_descriptor_set = leak.leak_descriptor_sets[self.current_buffer];
                     self.record_leak_dispatch(cmd, leak, leak_descriptor_set, &leak_push);
-                    self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
+                    self.record_compute_buffer_barrier(
+                        cmd,
+                        self.current_concentration_buffer_handle(),
+                    );
                 }
             }
 
@@ -1843,11 +1991,16 @@ impl GpuSimulation {
                         base_turnover_rate: 0.22,
                         _pad: [0; 2],
                     };
-                    let enzyme_descriptor_set = enzyme.enzyme_descriptor_sets[
-                        Self::reaction_descriptor_index(self.current_buffer, temperature_current_buffer)
-                    ];
+                    let enzyme_descriptor_set = enzyme.enzyme_descriptor_sets
+                        [Self::reaction_descriptor_index(
+                            self.current_buffer,
+                            temperature_current_buffer,
+                        )];
                     self.record_enzyme_dispatch(cmd, enzyme, enzyme_descriptor_set, &enzyme_push);
-                    self.record_compute_buffer_barrier(cmd, self.current_concentration_buffer_handle());
+                    self.record_compute_buffer_barrier(
+                        cmd,
+                        self.current_concentration_buffer_handle(),
+                    );
                 }
             }
         }
@@ -1874,11 +2027,13 @@ impl GpuSimulation {
         thermal_diffusivity: f32,
     ) -> Result<()> {
         unsafe {
-            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
         }
 
         self.record_step_frame(
@@ -1898,7 +2053,8 @@ impl GpuSimulation {
                 .command_buffers(std::slice::from_ref(&self.command_buffer));
 
             self.device.reset_fences(&[self.fence])?;
-            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device
+                .queue_submit(self.compute_queue, &[submit_info], self.fence)?;
             self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
         }
 
@@ -1921,11 +2077,13 @@ impl GpuSimulation {
         let descriptor_set = self.descriptor_sets[self.current_buffer];
 
         unsafe {
-            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
 
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
@@ -1953,14 +2111,23 @@ impl GpuSimulation {
             // Dispatch: one thread per cell, process all species
             let workgroup_size = 256u32;
             let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
-            self.device.cmd_dispatch(self.command_buffer, num_groups, self.species_count as u32, 1);
+            self.device.cmd_dispatch(
+                self.command_buffer,
+                num_groups,
+                self.species_count as u32,
+                1,
+            );
 
             // Memory barrier before coarse grid computation
             // Ensures diffusion writes complete before coarse reads
             let buffer_barrier = vk::BufferMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .buffer(if self.current_buffer == 0 { self.conc_buffer_b.buffer } else { self.conc_buffer_a.buffer })
+                .buffer(if self.current_buffer == 0 {
+                    self.conc_buffer_b.buffer
+                } else {
+                    self.conc_buffer_a.buffer
+                })
                 .offset(0)
                 .size(vk::WHOLE_SIZE);
 
@@ -1979,7 +2146,9 @@ impl GpuSimulation {
             // So coarse grid should read from the buffer that will be current after swap
             if let Some(ref coarse) = self.coarse_grid {
                 let next_buffer = 1 - self.current_buffer;
-                let temperature_current_buffer = self.reaction.as_ref()
+                let temperature_current_buffer = self
+                    .reaction
+                    .as_ref()
                     .map(|rxn| rxn.temperature_current_buffer)
                     .unwrap_or(0);
                 coarse.record_compute(self.command_buffer, next_buffer, temperature_current_buffer);
@@ -1991,7 +2160,8 @@ impl GpuSimulation {
                 .command_buffers(std::slice::from_ref(&self.command_buffer));
 
             self.device.reset_fences(&[self.fence])?;
-            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device
+                .queue_submit(self.compute_queue, &[submit_info], self.fence)?;
             self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
         }
 
@@ -2014,11 +2184,13 @@ impl GpuSimulation {
         let descriptor_set = self.charge_descriptor_sets[self.current_buffer];
 
         unsafe {
-            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
 
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
@@ -2045,7 +2217,8 @@ impl GpuSimulation {
 
             let workgroup_size = 256u32;
             let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
-            self.device.cmd_dispatch(self.command_buffer, num_groups, 1, 1);
+            self.device
+                .cmd_dispatch(self.command_buffer, num_groups, 1, 1);
 
             self.device.end_command_buffer(self.command_buffer)?;
 
@@ -2053,7 +2226,8 @@ impl GpuSimulation {
                 .command_buffers(std::slice::from_ref(&self.command_buffer));
 
             self.device.reset_fences(&[self.fence])?;
-            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device
+                .queue_submit(self.compute_queue, &[submit_info], self.fence)?;
             self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
         }
 
@@ -2082,7 +2256,9 @@ impl GpuSimulation {
             Some(self.command_buffer),
         )?;
 
-        let flat_data: Vec<f32> = self.readback_buffer.read(self.species_count * self.cell_count)?;
+        let flat_data: Vec<f32> = self
+            .readback_buffer
+            .read(self.species_count * self.cell_count)?;
 
         // Reshape to [species][cell]
         let mut concentrations = Vec::with_capacity(self.species_count);
@@ -2170,7 +2346,8 @@ impl GpuSimulation {
     }
 
     pub fn current_temperature_buffer(&self) -> vk::Buffer {
-        self.reaction.as_ref()
+        self.reaction
+            .as_ref()
             .map(|rxn| Self::temperature_buffer_handle(rxn, rxn.temperature_current_buffer))
             .unwrap_or(vk::Buffer::null())
     }
@@ -2214,7 +2391,9 @@ impl GpuSimulation {
         if temperature != vk::Buffer::null() {
             barriers.push(
                 vk::BufferMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                    .src_access_mask(
+                        vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE,
+                    )
                     .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .buffer(temperature)
                     .offset(0)
@@ -2244,8 +2423,10 @@ impl GpuSimulation {
         }
 
         let temp_buffer_size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
-        let rules_buffer_size = (MAX_REACTION_RULES * std::mem::size_of::<GpuReactionRule>()) as u64;
-        let conc_buffer_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
+        let rules_buffer_size =
+            (MAX_REACTION_RULES * std::mem::size_of::<GpuReactionRule>()) as u64;
+        let conc_buffer_size =
+            (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
         let mask_buffer_size = (self.cell_count * std::mem::size_of::<u32>()) as u64;
 
         let mut alloc = self.allocator.as_ref().unwrap().lock();
@@ -2308,36 +2489,46 @@ impl GpuSimulation {
         )?;
 
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
-        let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
-        options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+        let mut options =
+            shaderc::CompileOptions::new().context("Failed to create compile options")?;
+        options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_2 as u32,
+        );
         options.set_optimization_level(shaderc::OptimizationLevel::Performance);
 
-        let reaction_spirv = compiler.compile_into_spirv(
-            include_str!("../shaders/reaction.comp"),
-            shaderc::ShaderKind::Compute,
-            "reaction.comp",
-            "main",
-            Some(&options),
-        ).context("Failed to compile reaction shader")?;
+        let reaction_spirv = compiler
+            .compile_into_spirv(
+                include_str!("../shaders/reaction.comp"),
+                shaderc::ShaderKind::Compute,
+                "reaction.comp",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile reaction shader")?;
 
-        let thermal_spirv = compiler.compile_into_spirv(
-            include_str!("../shaders/thermal_diffusion.comp"),
-            shaderc::ShaderKind::Compute,
-            "thermal_diffusion.comp",
-            "main",
-            Some(&options),
-        ).context("Failed to compile thermal diffusion shader")?;
+        let thermal_spirv = compiler
+            .compile_into_spirv(
+                include_str!("../shaders/thermal_diffusion.comp"),
+                shaderc::ShaderKind::Compute,
+                "thermal_diffusion.comp",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile thermal diffusion shader")?;
 
-        let reaction_shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(reaction_spirv.as_binary());
+        let reaction_shader_module_info =
+            vk::ShaderModuleCreateInfo::default().code(reaction_spirv.as_binary());
         let reaction_shader_module = unsafe {
-            self.device.create_shader_module(&reaction_shader_module_info, None)?
+            self.device
+                .create_shader_module(&reaction_shader_module_info, None)?
         };
 
-        let thermal_shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(thermal_spirv.as_binary());
+        let thermal_shader_module_info =
+            vk::ShaderModuleCreateInfo::default().code(thermal_spirv.as_binary());
         let thermal_shader_module = unsafe {
-            self.device.create_shader_module(&thermal_shader_module_info, None)?
+            self.device
+                .create_shader_module(&thermal_shader_module_info, None)?
         };
 
         let reaction_bindings = [
@@ -2367,10 +2558,11 @@ impl GpuSimulation {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
-        let reaction_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&reaction_bindings);
+        let reaction_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&reaction_bindings);
         let reaction_descriptor_set_layout = unsafe {
-            self.device.create_descriptor_set_layout(&reaction_layout_info, None)?
+            self.device
+                .create_descriptor_set_layout(&reaction_layout_info, None)?
         };
 
         let reaction_push_constant_range = vk::PushConstantRange::default()
@@ -2382,7 +2574,8 @@ impl GpuSimulation {
             .set_layouts(std::slice::from_ref(&reaction_descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&reaction_push_constant_range));
         let reaction_pipeline_layout = unsafe {
-            self.device.create_pipeline_layout(&reaction_pipeline_layout_info, None)?
+            self.device
+                .create_pipeline_layout(&reaction_pipeline_layout_info, None)?
         };
 
         let entry_name = c"main";
@@ -2396,7 +2589,12 @@ impl GpuSimulation {
             .layout(reaction_pipeline_layout);
 
         let reaction_pipeline = unsafe {
-            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[reaction_pipeline_info], None)
+            self.device
+                .create_compute_pipelines(
+                    vk::PipelineCache::null(),
+                    &[reaction_pipeline_info],
+                    None,
+                )
                 .map_err(|e| anyhow::anyhow!("Failed to create reaction pipeline: {:?}", e.1))?[0]
         };
 
@@ -2418,10 +2616,11 @@ impl GpuSimulation {
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
-        let thermal_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&thermal_bindings);
+        let thermal_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&thermal_bindings);
         let thermal_descriptor_set_layout = unsafe {
-            self.device.create_descriptor_set_layout(&thermal_layout_info, None)?
+            self.device
+                .create_descriptor_set_layout(&thermal_layout_info, None)?
         };
 
         let thermal_push_constant_range = vk::PushConstantRange::default()
@@ -2433,7 +2632,8 @@ impl GpuSimulation {
             .set_layouts(std::slice::from_ref(&thermal_descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&thermal_push_constant_range));
         let thermal_pipeline_layout = unsafe {
-            self.device.create_pipeline_layout(&thermal_pipeline_layout_info, None)?
+            self.device
+                .create_pipeline_layout(&thermal_pipeline_layout_info, None)?
         };
 
         let thermal_stage_info = vk::PipelineShaderStageCreateInfo::default()
@@ -2446,25 +2646,27 @@ impl GpuSimulation {
             .layout(thermal_pipeline_layout);
 
         let thermal_pipeline = unsafe {
-            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[thermal_pipeline_info], None)
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[thermal_pipeline_info], None)
                 .map_err(|e| anyhow::anyhow!("Failed to create thermal pipeline: {:?}", e.1))?[0]
         };
 
         unsafe {
-            self.device.destroy_shader_module(reaction_shader_module, None);
-            self.device.destroy_shader_module(thermal_shader_module, None);
+            self.device
+                .destroy_shader_module(reaction_shader_module, None);
+            self.device
+                .destroy_shader_module(thermal_shader_module, None);
         };
 
-        let reaction_pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(16),
-        ];
+        let reaction_pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(16)];
         let reaction_pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(4)
             .pool_sizes(&reaction_pool_sizes);
         let reaction_descriptor_pool = unsafe {
-            self.device.create_descriptor_pool(&reaction_pool_info, None)?
+            self.device
+                .create_descriptor_pool(&reaction_pool_info, None)?
         };
 
         let reaction_layouts = [
@@ -2476,9 +2678,8 @@ impl GpuSimulation {
         let reaction_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(reaction_descriptor_pool)
             .set_layouts(&reaction_layouts);
-        let reaction_descriptor_sets = unsafe {
-            self.device.allocate_descriptor_sets(&reaction_alloc_info)?
-        };
+        let reaction_descriptor_sets =
+            unsafe { self.device.allocate_descriptor_sets(&reaction_alloc_info)? };
 
         let conc_buffers = [self.conc_buffer_a.buffer, self.conc_buffer_b.buffer];
         let temp_buffers = [temperature_buffer_a.buffer, temperature_buffer_b.buffer];
@@ -2499,25 +2700,23 @@ impl GpuSimulation {
                 );
             }
         }
-        let thermal_pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(6),
-        ];
+        let thermal_pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(6)];
         let thermal_pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(2)
             .pool_sizes(&thermal_pool_sizes);
         let thermal_descriptor_pool = unsafe {
-            self.device.create_descriptor_pool(&thermal_pool_info, None)?
+            self.device
+                .create_descriptor_pool(&thermal_pool_info, None)?
         };
 
         let thermal_layouts = [thermal_descriptor_set_layout, thermal_descriptor_set_layout];
         let thermal_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(thermal_descriptor_pool)
             .set_layouts(&thermal_layouts);
-        let thermal_descriptor_sets = unsafe {
-            self.device.allocate_descriptor_sets(&thermal_alloc_info)?
-        };
+        let thermal_descriptor_sets =
+            unsafe { self.device.allocate_descriptor_sets(&thermal_alloc_info)? };
 
         Self::update_thermal_descriptor_set(
             &self.device,
@@ -2561,20 +2760,32 @@ impl GpuSimulation {
             self.device.clone(),
             self.compute_queue,
             self.compute_queue_family,
-            self.allocator.as_ref().expect("allocator should exist").clone(),
+            self.allocator
+                .as_ref()
+                .expect("allocator should exist")
+                .clone(),
             self.width,
             self.height,
             self.species_count,
             8,
             self.conc_buffer_a.buffer,
             self.conc_buffer_b.buffer,
-            self.reaction.as_ref().expect("reaction initialized").temperature_buffer_a.buffer,
-            self.reaction.as_ref().expect("reaction initialized").temperature_buffer_b.buffer,
+            self.reaction
+                .as_ref()
+                .expect("reaction initialized")
+                .temperature_buffer_a
+                .buffer,
+            self.reaction
+                .as_ref()
+                .expect("reaction initialized")
+                .temperature_buffer_b
+                .buffer,
             self.solid_mask.buffer,
             (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64,
             (self.cell_count * std::mem::size_of::<f32>()) as u64,
             (self.cell_count * std::mem::size_of::<u32>()) as u64,
-        ).ok();
+        )
+        .ok();
 
         log::info!("Reaction pipeline initialized");
         Ok(())
@@ -2586,10 +2797,16 @@ impl GpuSimulation {
     /// Returns false if the rules are the same as before (no upload needed).
     pub fn upload_reaction_rules(&mut self, rules: &[GpuReactionRule]) -> Result<bool> {
         if rules.len() > MAX_REACTION_RULES {
-            bail!("Too many reaction rules: {} > {}", rules.len(), MAX_REACTION_RULES);
+            bail!(
+                "Too many reaction rules: {} > {}",
+                rules.len(),
+                MAX_REACTION_RULES
+            );
         }
 
-        let rxn = self.reaction.as_mut()
+        let rxn = self
+            .reaction
+            .as_mut()
             .context("Reaction pipeline not initialized")?;
 
         // Compute hash of the rule set to avoid redundant uploads
@@ -2633,7 +2850,11 @@ impl GpuSimulation {
         rxn.active_rule_count = rules.len() as u32;
         rxn.rule_set_hash = new_hash;
 
-        log::debug!("Uploaded {} reaction rules (hash={:#x})", rules.len(), new_hash);
+        log::debug!(
+            "Uploaded {} reaction rules (hash={:#x})",
+            rules.len(),
+            new_hash
+        );
         Ok(true)
     }
 
@@ -2658,16 +2879,17 @@ impl GpuSimulation {
         };
 
         // The reaction shader reads/writes the CURRENT buffer in-place
-        let descriptor_set = rxn.reaction_descriptor_sets[
-            Self::reaction_descriptor_index(self.current_buffer, rxn.temperature_current_buffer)
-        ];
+        let descriptor_set = rxn.reaction_descriptor_sets
+            [Self::reaction_descriptor_index(self.current_buffer, rxn.temperature_current_buffer)];
 
         unsafe {
-            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
 
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
@@ -2694,7 +2916,8 @@ impl GpuSimulation {
 
             let workgroup_size = 256u32;
             let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
-            self.device.cmd_dispatch(self.command_buffer, num_groups, 1, 1);
+            self.device
+                .cmd_dispatch(self.command_buffer, num_groups, 1, 1);
 
             self.device.end_command_buffer(self.command_buffer)?;
 
@@ -2702,7 +2925,8 @@ impl GpuSimulation {
                 .command_buffers(std::slice::from_ref(&self.command_buffer));
 
             self.device.reset_fences(&[self.fence])?;
-            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device
+                .queue_submit(self.compute_queue, &[submit_info], self.fence)?;
             self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
         }
 
@@ -2724,8 +2948,10 @@ impl GpuSimulation {
 
         let packed_channels = self.pack_leak_channels(channels, species_registry, solid_mask)?;
 
-        let channels_buffer_size = (MAX_LEAK_CHANNELS * std::mem::size_of::<GpuLeakChannel>()) as u64;
-        let conc_buffer_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
+        let channels_buffer_size =
+            (MAX_LEAK_CHANNELS * std::mem::size_of::<GpuLeakChannel>()) as u64;
+        let conc_buffer_size =
+            (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
         let charges_buffer_size = (self.species_count * std::mem::size_of::<i32>()) as u64;
 
         let mut alloc = self.allocator.as_ref().unwrap().lock();
@@ -2752,22 +2978,29 @@ impl GpuSimulation {
         )?;
 
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
-        let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
-        options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+        let mut options =
+            shaderc::CompileOptions::new().context("Failed to create compile options")?;
+        options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_2 as u32,
+        );
         options.set_optimization_level(shaderc::OptimizationLevel::Performance);
 
-        let leak_spirv = compiler.compile_into_spirv(
-            include_str!("../shaders/leak.comp"),
-            shaderc::ShaderKind::Compute,
-            "leak.comp",
-            "main",
-            Some(&options),
-        ).context("Failed to compile leak shader")?;
+        let leak_spirv = compiler
+            .compile_into_spirv(
+                include_str!("../shaders/leak.comp"),
+                shaderc::ShaderKind::Compute,
+                "leak.comp",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile leak shader")?;
 
-        let leak_shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(leak_spirv.as_binary());
+        let leak_shader_module_info =
+            vk::ShaderModuleCreateInfo::default().code(leak_spirv.as_binary());
         let leak_shader_module = unsafe {
-            self.device.create_shader_module(&leak_shader_module_info, None)?
+            self.device
+                .create_shader_module(&leak_shader_module_info, None)?
         };
 
         let leak_bindings = [
@@ -2787,9 +3020,11 @@ impl GpuSimulation {
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
-        let leak_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&leak_bindings);
+        let leak_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&leak_bindings);
         let leak_descriptor_set_layout = unsafe {
-            self.device.create_descriptor_set_layout(&leak_layout_info, None)?
+            self.device
+                .create_descriptor_set_layout(&leak_layout_info, None)?
         };
 
         let push_constant_range = vk::PushConstantRange::default()
@@ -2800,7 +3035,8 @@ impl GpuSimulation {
             .set_layouts(std::slice::from_ref(&leak_descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
         let leak_pipeline_layout = unsafe {
-            self.device.create_pipeline_layout(&leak_pipeline_layout_info, None)?
+            self.device
+                .create_pipeline_layout(&leak_pipeline_layout_info, None)?
         };
 
         let entry_name = c"main";
@@ -2812,7 +3048,8 @@ impl GpuSimulation {
             .stage(stage_info)
             .layout(leak_pipeline_layout);
         let leak_pipeline = unsafe {
-            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
                 .map_err(|e| anyhow::anyhow!("Failed to create leak pipeline: {:?}", e.1))?[0]
         };
 
@@ -2826,17 +3063,13 @@ impl GpuSimulation {
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(2)
             .pool_sizes(&pool_sizes);
-        let leak_descriptor_pool = unsafe {
-            self.device.create_descriptor_pool(&pool_info, None)?
-        };
+        let leak_descriptor_pool = unsafe { self.device.create_descriptor_pool(&pool_info, None)? };
 
         let layouts = [leak_descriptor_set_layout, leak_descriptor_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(leak_descriptor_pool)
             .set_layouts(&layouts);
-        let leak_descriptor_sets = unsafe {
-            self.device.allocate_descriptor_sets(&alloc_info)?
-        };
+        let leak_descriptor_sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
 
         Self::update_leak_descriptor_set(
             &self.device,
@@ -2918,13 +3151,21 @@ impl GpuSimulation {
         }
 
         let (temperature_buffer_a, temperature_buffer_b) = {
-            let rxn = self.reaction.as_ref().context("Reaction pipeline must be initialized before enzyme pipeline")?;
-            (rxn.temperature_buffer_a.buffer, rxn.temperature_buffer_b.buffer)
+            let rxn = self
+                .reaction
+                .as_ref()
+                .context("Reaction pipeline must be initialized before enzyme pipeline")?;
+            (
+                rxn.temperature_buffer_a.buffer,
+                rxn.temperature_buffer_b.buffer,
+            )
         };
         let packed_enzymes = self.pack_enzyme_entities(entities, species_registry)?;
 
-        let enzymes_buffer_size = (MAX_ENZYME_ENTITIES * std::mem::size_of::<GpuEnzymeEntity>()) as u64;
-        let conc_buffer_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
+        let enzymes_buffer_size =
+            (MAX_ENZYME_ENTITIES * std::mem::size_of::<GpuEnzymeEntity>()) as u64;
+        let conc_buffer_size =
+            (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
         let temp_buffer_size = (self.cell_count * std::mem::size_of::<f32>()) as u64;
 
         let mut alloc = self.allocator.as_ref().unwrap().lock();
@@ -2951,22 +3192,29 @@ impl GpuSimulation {
         )?;
 
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
-        let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
-        options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+        let mut options =
+            shaderc::CompileOptions::new().context("Failed to create compile options")?;
+        options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_2 as u32,
+        );
         options.set_optimization_level(shaderc::OptimizationLevel::Performance);
 
-        let enzyme_spirv = compiler.compile_into_spirv(
-            include_str!("../shaders/enzyme.comp"),
-            shaderc::ShaderKind::Compute,
-            "enzyme.comp",
-            "main",
-            Some(&options),
-        ).context("Failed to compile enzyme shader")?;
+        let enzyme_spirv = compiler
+            .compile_into_spirv(
+                include_str!("../shaders/enzyme.comp"),
+                shaderc::ShaderKind::Compute,
+                "enzyme.comp",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile enzyme shader")?;
 
-        let enzyme_shader_module_info = vk::ShaderModuleCreateInfo::default()
-            .code(enzyme_spirv.as_binary());
+        let enzyme_shader_module_info =
+            vk::ShaderModuleCreateInfo::default().code(enzyme_spirv.as_binary());
         let enzyme_shader_module = unsafe {
-            self.device.create_shader_module(&enzyme_shader_module_info, None)?
+            self.device
+                .create_shader_module(&enzyme_shader_module_info, None)?
         };
 
         let enzyme_bindings = [
@@ -2986,9 +3234,11 @@ impl GpuSimulation {
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
-        let enzyme_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&enzyme_bindings);
+        let enzyme_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&enzyme_bindings);
         let enzyme_descriptor_set_layout = unsafe {
-            self.device.create_descriptor_set_layout(&enzyme_layout_info, None)?
+            self.device
+                .create_descriptor_set_layout(&enzyme_layout_info, None)?
         };
 
         let push_constant_range = vk::PushConstantRange::default()
@@ -2999,7 +3249,8 @@ impl GpuSimulation {
             .set_layouts(std::slice::from_ref(&enzyme_descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
         let enzyme_pipeline_layout = unsafe {
-            self.device.create_pipeline_layout(&enzyme_pipeline_layout_info, None)?
+            self.device
+                .create_pipeline_layout(&enzyme_pipeline_layout_info, None)?
         };
 
         let entry_name = c"main";
@@ -3011,12 +3262,14 @@ impl GpuSimulation {
             .stage(stage_info)
             .layout(enzyme_pipeline_layout);
         let enzyme_pipeline = unsafe {
-            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
                 .map_err(|e| anyhow::anyhow!("Failed to create enzyme pipeline: {:?}", e.1))?[0]
         };
 
         unsafe {
-            self.device.destroy_shader_module(enzyme_shader_module, None);
+            self.device
+                .destroy_shader_module(enzyme_shader_module, None);
         }
 
         let pool_sizes = [vk::DescriptorPoolSize::default()
@@ -3025,9 +3278,8 @@ impl GpuSimulation {
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(4)
             .pool_sizes(&pool_sizes);
-        let enzyme_descriptor_pool = unsafe {
-            self.device.create_descriptor_pool(&pool_info, None)?
-        };
+        let enzyme_descriptor_pool =
+            unsafe { self.device.create_descriptor_pool(&pool_info, None)? };
 
         let layouts = [
             enzyme_descriptor_set_layout,
@@ -3038,13 +3290,12 @@ impl GpuSimulation {
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(enzyme_descriptor_pool)
             .set_layouts(&layouts);
-        let enzyme_descriptor_sets = unsafe {
-            self.device.allocate_descriptor_sets(&alloc_info)?
-        };
+        let enzyme_descriptor_sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
 
         for conc_current_buffer in 0..2 {
             for temp_current_buffer in 0..2 {
-                let descriptor_index = Self::reaction_descriptor_index(conc_current_buffer, temp_current_buffer);
+                let descriptor_index =
+                    Self::reaction_descriptor_index(conc_current_buffer, temp_current_buffer);
                 let conc_buffer = if conc_current_buffer == 0 {
                     self.conc_buffer_a.buffer
                 } else {
@@ -3132,11 +3383,13 @@ impl GpuSimulation {
         let pipeline_layout = rxn.thermal_pipeline_layout;
 
         unsafe {
-            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(self.command_buffer, &begin_info)?;
+            self.device
+                .begin_command_buffer(self.command_buffer, &begin_info)?;
 
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
@@ -3163,7 +3416,8 @@ impl GpuSimulation {
 
             let workgroup_size = 256u32;
             let num_groups = (self.cell_count as u32 + workgroup_size - 1) / workgroup_size;
-            self.device.cmd_dispatch(self.command_buffer, num_groups, 1, 1);
+            self.device
+                .cmd_dispatch(self.command_buffer, num_groups, 1, 1);
 
             self.device.end_command_buffer(self.command_buffer)?;
 
@@ -3171,7 +3425,8 @@ impl GpuSimulation {
                 .command_buffers(std::slice::from_ref(&self.command_buffer));
 
             self.device.reset_fences(&[self.fence])?;
-            self.device.queue_submit(self.compute_queue, &[submit_info], self.fence)?;
+            self.device
+                .queue_submit(self.compute_queue, &[submit_info], self.fence)?;
             self.device.wait_for_fences(&[self.fence], true, u64::MAX)?;
         }
 
@@ -3186,7 +3441,7 @@ impl Drop for GpuSimulation {
         unsafe {
             self.device.device_wait_idle().ok();
             log::info!("GpuSimulation::drop - device idle");
-            
+
             // Drop coarse_grid FIRST - it holds cloned device handle and references our buffers
             drop(self.coarse_grid.take());
             log::info!("GpuSimulation::drop - coarse_grid dropped");
@@ -3196,96 +3451,151 @@ impl Drop for GpuSimulation {
 
             // Clean up reaction pipeline if present
             if let Some(mut rxn) = self.reaction.take() {
-                self.device.destroy_descriptor_pool(rxn.reaction_descriptor_pool, None);
+                self.device
+                    .destroy_descriptor_pool(rxn.reaction_descriptor_pool, None);
                 self.device.destroy_pipeline(rxn.reaction_pipeline, None);
-                self.device.destroy_pipeline_layout(rxn.reaction_pipeline_layout, None);
-                self.device.destroy_descriptor_set_layout(rxn.reaction_descriptor_set_layout, None);
-                self.device.destroy_descriptor_pool(rxn.thermal_descriptor_pool, None);
+                self.device
+                    .destroy_pipeline_layout(rxn.reaction_pipeline_layout, None);
+                self.device
+                    .destroy_descriptor_set_layout(rxn.reaction_descriptor_set_layout, None);
+                self.device
+                    .destroy_descriptor_pool(rxn.thermal_descriptor_pool, None);
                 self.device.destroy_pipeline(rxn.thermal_pipeline, None);
-                self.device.destroy_pipeline_layout(rxn.thermal_pipeline_layout, None);
-                self.device.destroy_descriptor_set_layout(rxn.thermal_descriptor_set_layout, None);
+                self.device
+                    .destroy_pipeline_layout(rxn.thermal_pipeline_layout, None);
+                self.device
+                    .destroy_descriptor_set_layout(rxn.thermal_descriptor_set_layout, None);
 
                 let mut alloc = self.allocator.as_ref().unwrap().lock();
-                self.device.destroy_buffer(rxn.temperature_buffer_a.buffer, None);
-                alloc.free(std::mem::take(&mut rxn.temperature_buffer_a.allocation)).ok();
-                self.device.destroy_buffer(rxn.temperature_buffer_b.buffer, None);
-                alloc.free(std::mem::take(&mut rxn.temperature_buffer_b.allocation)).ok();
+                self.device
+                    .destroy_buffer(rxn.temperature_buffer_a.buffer, None);
+                alloc
+                    .free(std::mem::take(&mut rxn.temperature_buffer_a.allocation))
+                    .ok();
+                self.device
+                    .destroy_buffer(rxn.temperature_buffer_b.buffer, None);
+                alloc
+                    .free(std::mem::take(&mut rxn.temperature_buffer_b.allocation))
+                    .ok();
                 self.device.destroy_buffer(rxn.rules_buffer.buffer, None);
-                alloc.free(std::mem::take(&mut rxn.rules_buffer.allocation)).ok();
+                alloc
+                    .free(std::mem::take(&mut rxn.rules_buffer.allocation))
+                    .ok();
                 drop(alloc);
             }
             log::info!("GpuSimulation::drop - reaction pipeline dropped");
 
             if let Some(mut leak) = self.leak.take() {
-                self.device.destroy_descriptor_pool(leak.leak_descriptor_pool, None);
+                self.device
+                    .destroy_descriptor_pool(leak.leak_descriptor_pool, None);
                 self.device.destroy_pipeline(leak.leak_pipeline, None);
-                self.device.destroy_pipeline_layout(leak.leak_pipeline_layout, None);
-                self.device.destroy_descriptor_set_layout(leak.leak_descriptor_set_layout, None);
+                self.device
+                    .destroy_pipeline_layout(leak.leak_pipeline_layout, None);
+                self.device
+                    .destroy_descriptor_set_layout(leak.leak_descriptor_set_layout, None);
 
                 let mut alloc = self.allocator.as_ref().unwrap().lock();
-                self.device.destroy_buffer(leak.channels_buffer.buffer, None);
-                alloc.free(std::mem::take(&mut leak.channels_buffer.allocation)).ok();
+                self.device
+                    .destroy_buffer(leak.channels_buffer.buffer, None);
+                alloc
+                    .free(std::mem::take(&mut leak.channels_buffer.allocation))
+                    .ok();
                 drop(alloc);
             }
             log::info!("GpuSimulation::drop - leak pipeline dropped");
 
             if let Some(mut enzyme) = self.enzyme.take() {
-                self.device.destroy_descriptor_pool(enzyme.enzyme_descriptor_pool, None);
+                self.device
+                    .destroy_descriptor_pool(enzyme.enzyme_descriptor_pool, None);
                 self.device.destroy_pipeline(enzyme.enzyme_pipeline, None);
-                self.device.destroy_pipeline_layout(enzyme.enzyme_pipeline_layout, None);
-                self.device.destroy_descriptor_set_layout(enzyme.enzyme_descriptor_set_layout, None);
+                self.device
+                    .destroy_pipeline_layout(enzyme.enzyme_pipeline_layout, None);
+                self.device
+                    .destroy_descriptor_set_layout(enzyme.enzyme_descriptor_set_layout, None);
 
                 let mut alloc = self.allocator.as_ref().unwrap().lock();
-                self.device.destroy_buffer(enzyme.enzymes_buffer.buffer, None);
-                alloc.free(std::mem::take(&mut enzyme.enzymes_buffer.allocation)).ok();
+                self.device
+                    .destroy_buffer(enzyme.enzymes_buffer.buffer, None);
+                alloc
+                    .free(std::mem::take(&mut enzyme.enzymes_buffer.allocation))
+                    .ok();
                 drop(alloc);
             }
             log::info!("GpuSimulation::drop - enzyme pipeline dropped");
 
-            self.device.destroy_descriptor_pool(self.charge_descriptor_pool, None);
-            self.device.destroy_pipeline(self.charge_projection_pipeline, None);
-            self.device.destroy_pipeline_layout(self.charge_pipeline_layout, None);
-            self.device.destroy_descriptor_set_layout(self.charge_descriptor_set_layout, None);
+            self.device
+                .destroy_descriptor_pool(self.charge_descriptor_pool, None);
+            self.device
+                .destroy_pipeline(self.charge_projection_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.charge_pipeline_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.charge_descriptor_set_layout, None);
 
-            self.device.destroy_descriptor_pool(self.descriptor_pool, None);
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_pipeline(self.diffusion_pipeline, None);
-            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 
             // Buffers and allocations
             let mut alloc = self.allocator.as_ref().unwrap().lock();
-            
-            self.device.destroy_buffer(self.conc_buffer_a.buffer, None);
-            alloc.free(std::mem::take(&mut self.conc_buffer_a.allocation)).ok();
-            
-            self.device.destroy_buffer(self.conc_buffer_b.buffer, None);
-            alloc.free(std::mem::take(&mut self.conc_buffer_b.allocation)).ok();
-            
-            self.device.destroy_buffer(self.solid_mask.buffer, None);
-            alloc.free(std::mem::take(&mut self.solid_mask.allocation)).ok();
-            
-            self.device.destroy_buffer(self.material_ids.buffer, None);
-            alloc.free(std::mem::take(&mut self.material_ids.allocation)).ok();
-            
-            self.device.destroy_buffer(self.diffusion_coeffs.buffer, None);
-            alloc.free(std::mem::take(&mut self.diffusion_coeffs.allocation)).ok();
 
-            self.device.destroy_buffer(self.species_charges.buffer, None);
-            alloc.free(std::mem::take(&mut self.species_charges.allocation)).ok();
-            
+            self.device.destroy_buffer(self.conc_buffer_a.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.conc_buffer_a.allocation))
+                .ok();
+
+            self.device.destroy_buffer(self.conc_buffer_b.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.conc_buffer_b.allocation))
+                .ok();
+
+            self.device.destroy_buffer(self.solid_mask.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.solid_mask.allocation))
+                .ok();
+
+            self.device.destroy_buffer(self.material_ids.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.material_ids.allocation))
+                .ok();
+
+            self.device
+                .destroy_buffer(self.diffusion_coeffs.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.diffusion_coeffs.allocation))
+                .ok();
+
+            self.device
+                .destroy_buffer(self.species_charges.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.species_charges.allocation))
+                .ok();
+
             self.device.destroy_buffer(self.staging_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.staging_buffer.allocation)).ok();
-            
-            self.device.destroy_buffer(self.readback_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.readback_buffer.allocation)).ok();
-            
+            alloc
+                .free(std::mem::take(&mut self.staging_buffer.allocation))
+                .ok();
+
+            self.device
+                .destroy_buffer(self.readback_buffer.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.readback_buffer.allocation))
+                .ok();
+
             drop(alloc);
             log::info!("GpuSimulation::drop - buffers freed");
 
             // Drop the allocator BEFORE destroying the device.
             // gpu_allocator::Allocator::drop calls vkFreeMemory, which requires a live device.
             drop(self.allocator.take());
-            log::info!("GpuSimulation::drop - allocator dropped, device handle: {:?}", self.device.handle());
+            log::info!(
+                "GpuSimulation::drop - allocator dropped, device handle: {:?}",
+                self.device.handle()
+            );
 
             if self.owns_vulkan_context {
                 self.device.destroy_device(None);

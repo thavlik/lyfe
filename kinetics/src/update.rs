@@ -117,14 +117,12 @@ pub struct TileUpdate {
     pub tile_id: u32,
 
     // --- Diffusion / transport modifiers ---
-    
     /// Multipliers for effective diffusion per species (1.0 = no change)
     pub effective_diffusion_multipliers: Vec<SpeciesScalar>,
     /// Miscibility overrides for species pairs in this tile
     pub miscibility_overrides: Vec<MiscibilityOverride>,
 
     // --- Thermal behavior ---
-    
     /// Heat source/sink rate (W/m³, positive = source, negative = sink)
     pub heat_source_watts_per_m3: Option<f64>,
     /// Effective heat capacity override (J/(kg·K))
@@ -135,12 +133,10 @@ pub struct TileUpdate {
     pub target_temperature: Option<f64>,
 
     // --- Equilibrium / semantic targets ---
-    
     /// Target concentrations to drive toward (mol/L)
     pub equilibrium_targets: Vec<SpeciesScalar>,
 
     // --- Reaction control ---
-    
     /// Reaction sets enabled in this tile
     pub enabled_reaction_sets: Vec<ReactionSetId>,
     /// Reaction sets explicitly disabled in this tile
@@ -307,29 +303,24 @@ pub struct SemanticUpdate {
     pub valid_until_time_seconds: f64,
 
     // --- Tilewise updates ---
-    
     /// Updates for specific tiles (sparse: only tiles with changes)
     pub tile_updates: Vec<TileUpdate>,
 
     // --- Boundary updates ---
-    
     /// Updates for specific boundaries (sparse: only boundaries with changes)
     pub boundary_updates: Vec<BoundaryUpdate>,
 
     // --- Reaction directives ---
-    
     /// Reaction directives to apply
     pub reaction_directives: Vec<ReactionDirective>,
 
     // --- Global modifiers ---
-    
     /// Global diffusion rate multiplier (1.0 = no change)
     pub global_diffusion_multiplier: f64,
     /// Global temperature adjustment (Kelvin, additive)
     pub global_temperature_adjustment: f64,
 
     // --- Diagnostics ---
-    
     /// Diagnostic messages from the evaluation
     pub diagnostics: Vec<crate::KineticsDiagnostic>,
 }
@@ -361,7 +352,11 @@ impl SemanticUpdate {
     /// Count the number of non-trivial updates.
     pub fn update_count(&self) -> usize {
         let tile_count = self.tile_updates.iter().filter(|u| !u.is_noop()).count();
-        let boundary_count = self.boundary_updates.iter().filter(|u| !u.is_noop()).count();
+        let boundary_count = self
+            .boundary_updates
+            .iter()
+            .filter(|u| !u.is_noop())
+            .count();
         tile_count + boundary_count + self.reaction_directives.len()
     }
 

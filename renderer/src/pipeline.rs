@@ -4,9 +4,8 @@ use anyhow::{Context as _, Result};
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use fluidsim::{GpuRenderBuffers, RenderState};
-use gpu_allocator::vulkan::{Allocator, AllocationCreateDesc, AllocationScheme, Allocation};
 use gpu_allocator::MemoryLocation;
-
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 
 use crate::context::RenderContext;
 
@@ -36,8 +35,8 @@ pub struct VisualizationPushConstants {
     pub width: u32,
     pub height: u32,
     pub species_count: u32,
-    pub frame_counter: u32,  // For debug visualization
-    pub thermal_view: u32,   // 1 = show thermal view, 0 = normal
+    pub frame_counter: u32, // For debug visualization
+    pub thermal_view: u32,  // 1 = show thermal view, 0 = normal
 }
 
 /// A GPU buffer for the render pipeline.
@@ -76,12 +75,18 @@ impl RenderBuffer {
             device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
         }
 
-        Ok(Self { buffer, allocation, size })
+        Ok(Self {
+            buffer,
+            allocation,
+            size,
+        })
     }
 
     pub fn write<T: Pod>(&mut self, data: &[T]) -> Result<()> {
         let bytes = bytemuck::cast_slice(data);
-        let mapped = self.allocation.mapped_slice_mut()
+        let mapped = self
+            .allocation
+            .mapped_slice_mut()
             .context("Buffer not mapped")?;
         mapped[..bytes.len()].copy_from_slice(bytes);
         Ok(())
@@ -89,7 +94,9 @@ impl RenderBuffer {
 
     pub fn write_at<T: Pod>(&mut self, byte_offset: usize, data: &[T]) -> Result<()> {
         let bytes = bytemuck::cast_slice(data);
-        let mapped = self.allocation.mapped_slice_mut()
+        let mapped = self
+            .allocation
+            .mapped_slice_mut()
             .context("Buffer not mapped")?;
         let end = byte_offset + bytes.len();
         mapped[byte_offset..end].copy_from_slice(bytes);
@@ -121,16 +128,22 @@ pub struct RenderPipeline {
     pub grid_height: u32,
     pub species_count: usize,
     pub cell_count: usize,
-    
+
     // Frame counter for debug visualization
     pub frame_counter: u32,
     pub bound_gpu_buffers: Option<GpuRenderBuffers>,
 }
 
 impl RenderPipeline {
-    pub fn new(ctx: &RenderContext, grid_width: u32, grid_height: u32, species_count: usize, species_colors: &[[f32; 4]]) -> Result<Self> {
+    pub fn new(
+        ctx: &RenderContext,
+        grid_width: u32,
+        grid_height: u32,
+        species_count: usize,
+        species_colors: &[[f32; 4]],
+    ) -> Result<Self> {
         let cell_count = (grid_width * grid_height) as usize;
-        
+
         // Buffer sizes
         let conc_size = (species_count * cell_count * std::mem::size_of::<f32>()) as u64;
         let mask_size = (cell_count * std::mem::size_of::<u32>()) as u64;
@@ -230,9 +243,11 @@ impl RenderPipeline {
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
 
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&bindings);
-        let descriptor_set_layout = unsafe { ctx.device.create_descriptor_set_layout(&layout_info, None)? };
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let descriptor_set_layout = unsafe {
+            ctx.device
+                .create_descriptor_set_layout(&layout_info, None)?
+        };
 
         // Create pipeline layout
         let push_constant_range = vk::PushConstantRange::default()
@@ -243,23 +258,42 @@ impl RenderPipeline {
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(std::slice::from_ref(&descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-        let pipeline_layout = unsafe { ctx.device.create_pipeline_layout(&pipeline_layout_info, None)? };
+        let pipeline_layout = unsafe {
+            ctx.device
+                .create_pipeline_layout(&pipeline_layout_info, None)?
+        };
 
         // Compile shaders
         let compiler = shaderc::Compiler::new().context("Failed to create shader compiler")?;
-        let mut options = shaderc::CompileOptions::new().context("Failed to create compile options")?;
-        options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+        let mut options =
+            shaderc::CompileOptions::new().context("Failed to create compile options")?;
+        options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_2 as u32,
+        );
 
         let vert_source = include_str!("../shaders/fullscreen.vert");
         let frag_source = include_str!("../shaders/visualization.frag");
 
-        let vert_spirv = compiler.compile_into_spirv(
-            vert_source, shaderc::ShaderKind::Vertex, "fullscreen.vert", "main", Some(&options)
-        ).context("Failed to compile vertex shader")?;
+        let vert_spirv = compiler
+            .compile_into_spirv(
+                vert_source,
+                shaderc::ShaderKind::Vertex,
+                "fullscreen.vert",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile vertex shader")?;
 
-        let frag_spirv = compiler.compile_into_spirv(
-            frag_source, shaderc::ShaderKind::Fragment, "visualization.frag", "main", Some(&options)
-        ).context("Failed to compile fragment shader")?;
+        let frag_spirv = compiler
+            .compile_into_spirv(
+                frag_source,
+                shaderc::ShaderKind::Fragment,
+                "visualization.frag",
+                "main",
+                Some(&options),
+            )
+            .context("Failed to compile fragment shader")?;
 
         let vert_module_info = vk::ShaderModuleCreateInfo::default().code(vert_spirv.as_binary());
         let frag_module_info = vk::ShaderModuleCreateInfo::default().code(frag_spirv.as_binary());
@@ -321,8 +355,8 @@ impl RenderPipeline {
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
-            .dynamic_states(&dynamic_states);
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
@@ -338,7 +372,8 @@ impl RenderPipeline {
             .subpass(0);
 
         let pipeline = unsafe {
-            ctx.device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            ctx.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
                 .map_err(|e| anyhow::anyhow!("Failed to create graphics pipeline: {:?}", e.1))?[0]
         };
 
@@ -348,11 +383,9 @@ impl RenderPipeline {
         }
 
         // Create descriptor pool and set
-        let pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(5),
-        ];
+        let pool_sizes = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(5)];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
@@ -511,11 +544,15 @@ impl RenderPipeline {
         // Debug: Log a sample concentration to verify data is changing
         let center_idx = self.cell_count / 2 + self.grid_width as usize / 2;
         if self.frame_counter % 30 == 0 {
-            log::debug!("Upload frame {}: center concentrations = [{:.4}, {:.4}, {:.4}]",
+            log::debug!(
+                "Upload frame {}: center concentrations = [{:.4}, {:.4}, {:.4}]",
                 self.frame_counter,
                 flat_conc.get(center_idx).unwrap_or(&0.0),
                 flat_conc.get(self.cell_count + center_idx).unwrap_or(&0.0),
-                flat_conc.get(2 * self.cell_count + center_idx).unwrap_or(&0.0));
+                flat_conc
+                    .get(2 * self.cell_count + center_idx)
+                    .unwrap_or(&0.0)
+            );
         }
 
         let conc_size = (self.species_count * self.cell_count * std::mem::size_of::<f32>()) as u64;
@@ -528,9 +565,12 @@ impl RenderPipeline {
         let temp_offset = material_offset + mask_size as usize;
 
         self.staging_buffer.write_at(conc_offset, &flat_conc)?;
-        self.staging_buffer.write_at(solid_offset, &state.solid_mask)?;
-        self.staging_buffer.write_at(material_offset, &state.material_ids)?;
-        self.staging_buffer.write_at(temp_offset, &state.temperatures)?;
+        self.staging_buffer
+            .write_at(solid_offset, &state.solid_mask)?;
+        self.staging_buffer
+            .write_at(material_offset, &state.material_ids)?;
+        self.staging_buffer
+            .write_at(temp_offset, &state.temperatures)?;
 
         let copies = [
             BufferCopyJob {
@@ -571,9 +611,9 @@ impl RenderPipeline {
     ) {
         // Increment frame counter
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        
+
         // Note: Memory barriers for buffer transfers are now in copy_buffer_with_barrier()
-        
+
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [0.0, 0.0, 0.1, 1.0], // Dark blue background
@@ -616,8 +656,10 @@ impl RenderPipeline {
         };
 
         unsafe {
-            ctx.device.cmd_begin_render_pass(cmd, &render_pass_info, vk::SubpassContents::INLINE);
-            ctx.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            ctx.device
+                .cmd_begin_render_pass(cmd, &render_pass_info, vk::SubpassContents::INLINE);
+            ctx.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             ctx.device.cmd_set_viewport(cmd, 0, &[viewport_state]);
             ctx.device.cmd_set_scissor(cmd, 0, &[scissor]);
             ctx.device.cmd_bind_descriptor_sets(
@@ -651,29 +693,49 @@ impl RenderPipeline {
     pub fn destroy(&mut self, ctx: &RenderContext) {
         unsafe {
             ctx.device.destroy_pipeline(self.pipeline, None);
-            ctx.device.destroy_pipeline_layout(self.pipeline_layout, None);
-            ctx.device.destroy_descriptor_pool(self.descriptor_pool, None);
-            ctx.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            ctx.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            ctx.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            ctx.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 
             let mut alloc = ctx.allocator.as_ref().unwrap().lock();
 
-            ctx.device.destroy_buffer(self.concentration_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.concentration_buffer.allocation)).ok();
+            ctx.device
+                .destroy_buffer(self.concentration_buffer.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.concentration_buffer.allocation))
+                .ok();
 
-            ctx.device.destroy_buffer(self.solid_mask_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.solid_mask_buffer.allocation)).ok();
+            ctx.device
+                .destroy_buffer(self.solid_mask_buffer.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.solid_mask_buffer.allocation))
+                .ok();
 
-            ctx.device.destroy_buffer(self.material_id_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.material_id_buffer.allocation)).ok();
+            ctx.device
+                .destroy_buffer(self.material_id_buffer.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.material_id_buffer.allocation))
+                .ok();
 
-            ctx.device.destroy_buffer(self.species_color_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.species_color_buffer.allocation)).ok();
+            ctx.device
+                .destroy_buffer(self.species_color_buffer.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.species_color_buffer.allocation))
+                .ok();
 
-            ctx.device.destroy_buffer(self.temperature_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.temperature_buffer.allocation)).ok();
+            ctx.device
+                .destroy_buffer(self.temperature_buffer.buffer, None);
+            alloc
+                .free(std::mem::take(&mut self.temperature_buffer.allocation))
+                .ok();
 
             ctx.device.destroy_buffer(self.staging_buffer.buffer, None);
-            alloc.free(std::mem::take(&mut self.staging_buffer.allocation)).ok();
+            alloc
+                .free(std::mem::take(&mut self.staging_buffer.allocation))
+                .ok();
         }
     }
 }
@@ -699,8 +761,8 @@ fn copy_buffer_batch_with_barriers(
         .command_buffer_count(1);
     let cmd = unsafe { ctx.device.allocate_command_buffers(&alloc_info)? }[0];
 
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe { ctx.device.begin_command_buffer(cmd, &begin_info)? };
 
     let mut barriers = Vec::with_capacity(jobs.len());
@@ -709,7 +771,10 @@ fn copy_buffer_batch_with_barriers(
             .src_offset(job.src_offset)
             .dst_offset(0)
             .size(job.size);
-        unsafe { ctx.device.cmd_copy_buffer(cmd, src, job.dst, &[copy_region]) };
+        unsafe {
+            ctx.device
+                .cmd_copy_buffer(cmd, src, job.dst, &[copy_region])
+        };
 
         barriers.push(
             vk::BufferMemoryBarrier::default()
@@ -738,11 +803,11 @@ fn copy_buffer_batch_with_barriers(
     let fence_info = vk::FenceCreateInfo::default();
     let fence = unsafe { ctx.device.create_fence(&fence_info, None)? };
 
-    let submit_info = vk::SubmitInfo::default()
-        .command_buffers(std::slice::from_ref(&cmd));
+    let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
 
     unsafe {
-        ctx.device.queue_submit(ctx.graphics_queue, &[submit_info], fence)?;
+        ctx.device
+            .queue_submit(ctx.graphics_queue, &[submit_info], fence)?;
         ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
         ctx.device.destroy_fence(fence, None);
         ctx.device.free_command_buffers(ctx.command_pool, &[cmd]);

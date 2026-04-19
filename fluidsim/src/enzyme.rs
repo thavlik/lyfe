@@ -98,13 +98,13 @@ impl EnzymeEntity {
         self.y = candidate.y;
 
         self.rotation_radians = wrap_angle(
-            self.rotation_radians
-                + self.next_gaussian() * field.rotational_diffusion * dt.sqrt(),
+            self.rotation_radians + self.next_gaussian() * field.rotational_diffusion * dt.sqrt(),
         );
     }
 
     fn next_uniform(&mut self) -> f32 {
-        self.rng_state = self.rng_state
+        self.rng_state = self
+            .rng_state
             .wrapping_mul(1_664_525)
             .wrapping_add(1_013_904_223);
         (self.rng_state >> 8) as f32 / ((u32::MAX >> 8) as f32)

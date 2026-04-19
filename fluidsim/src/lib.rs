@@ -31,36 +31,33 @@
 //! This layout optimizes for per-species diffusion passes where each compute
 //! shader invocation processes one species channel across all cells.
 
-pub mod species;
-pub mod grid;
-pub mod solid;
-pub mod scenario;
-pub mod sim;
-pub mod gpu;
-pub mod inspect;
 pub mod chemistry;
 pub mod coarse;
-pub mod semantic;
+pub mod enzyme;
+pub mod gpu;
+pub mod grid;
+pub mod inspect;
 pub mod kinetics_integration;
 pub mod leak;
-pub mod enzyme;
+pub mod scenario;
+pub mod semantic;
+pub mod sim;
+pub mod solid;
+pub mod species;
 
-pub use species::{SpeciesId, SpeciesRegistry};
-pub use grid::{Grid, CellCoord};
-pub use solid::{MaterialId, SolidCellMeta, SolidGeometry};
-pub use scenario::{
-	Scenario,
-	ScenarioBuilder,
-	create_acid_base_scenario,
-	create_catalyst_scenario,
-	create_enzyme_scenario,
-};
-pub use sim::{Simulation, SimulationConfig, RenderState};
-pub use gpu::{GpuRenderBuffers, SharedGpuContext};
-pub use inspect::{InspectionResult, CoarseCellCoord};
 pub use chemistry::{ChemicalEvolutionRule, NoOpEvolution};
-pub use coarse::{CoarseGrid, CoarseCellData};
-pub use semantic::{SemanticConfig, SemanticSnapshotBuilder};
+pub use coarse::{CoarseCellData, CoarseGrid};
+pub use enzyme::{EnzymeEntity, EnzymeField};
+pub use gpu::{GpuRenderBuffers, SharedGpuContext};
+pub use grid::{CellCoord, Grid};
+pub use inspect::{CoarseCellCoord, InspectionResult};
 pub use kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
 pub use leak::LeakChannel;
-pub use enzyme::{EnzymeEntity, EnzymeField};
+pub use scenario::{
+    Scenario, ScenarioBuilder, create_acid_base_scenario, create_catalyst_scenario,
+    create_enzyme_scenario,
+};
+pub use semantic::{SemanticConfig, SemanticSnapshotBuilder};
+pub use sim::{RenderState, Simulation, SimulationConfig};
+pub use solid::{MaterialId, SolidCellMeta, SolidGeometry};
+pub use species::{SpeciesId, SpeciesRegistry};

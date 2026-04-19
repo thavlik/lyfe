@@ -15,7 +15,7 @@ pub struct MaterialId(pub u32);
 impl MaterialId {
     /// No material (fluid cell).
     pub const NONE: MaterialId = MaterialId(0);
-    
+
     /// Create a new material ID.
     pub fn new(id: u32) -> Self {
         Self(id)
@@ -74,7 +74,7 @@ impl MaterialRegistry {
     pub fn register(&mut self, name: &str, color: [f32; 4]) -> MaterialId {
         let id = MaterialId::new(self.materials.len() as u32);
         let name_arc: Arc<str> = name.into();
-        
+
         self.materials.push(MaterialInfo {
             id,
             name: name_arc.clone(),
@@ -82,7 +82,7 @@ impl MaterialRegistry {
             metadata: AHashMap::new(),
         });
         self.name_to_id.insert(name_arc, id);
-        
+
         id
     }
 
@@ -172,13 +172,19 @@ impl SolidGeometry {
     /// Check if a cell is solid.
     #[inline]
     pub fn is_solid(&self, index: usize) -> bool {
-        self.material_ids.get(index).map(|m| m.0 != 0).unwrap_or(false)
+        self.material_ids
+            .get(index)
+            .map(|m| m.0 != 0)
+            .unwrap_or(false)
     }
 
     /// Get the material of a cell.
     #[inline]
     pub fn material(&self, index: usize) -> MaterialId {
-        self.material_ids.get(index).copied().unwrap_or(MaterialId::NONE)
+        self.material_ids
+            .get(index)
+            .copied()
+            .unwrap_or(MaterialId::NONE)
     }
 
     /// Get metadata for a cell.
@@ -187,7 +193,15 @@ impl SolidGeometry {
     }
 
     /// Fill a rectangular region with solid material.
-    pub fn fill_rect(&mut self, x0: u32, y0: u32, x1: u32, y1: u32, width: u32, material: MaterialId) {
+    pub fn fill_rect(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        width: u32,
+        material: MaterialId,
+    ) {
         for y in y0..y1 {
             for x in x0..x1 {
                 let index = (y * width + x) as usize;
@@ -199,8 +213,10 @@ impl SolidGeometry {
     /// Create a hollow rectangle (outline only).
     pub fn fill_hollow_rect(
         &mut self,
-        x0: u32, y0: u32,
-        x1: u32, y1: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
         thickness: u32,
         width: u32,
         material: MaterialId,
@@ -210,8 +226,22 @@ impl SolidGeometry {
         // Bottom edge
         self.fill_rect(x0, y1 - thickness, x1, y1, width, material);
         // Left edge
-        self.fill_rect(x0, y0 + thickness, x0 + thickness, y1 - thickness, width, material);
+        self.fill_rect(
+            x0,
+            y0 + thickness,
+            x0 + thickness,
+            y1 - thickness,
+            width,
+            material,
+        );
         // Right edge
-        self.fill_rect(x1 - thickness, y0 + thickness, x1, y1 - thickness, width, material);
+        self.fill_rect(
+            x1 - thickness,
+            y0 + thickness,
+            x1,
+            y1 - thickness,
+            width,
+            material,
+        );
     }
 }

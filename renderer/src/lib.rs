@@ -13,9 +13,9 @@
 //! samples concentration data and produces colors.
 
 pub mod context;
-pub mod pipeline;
 pub mod egui_integration;
+pub mod pipeline;
 
 pub use context::{PresentModePreference, RenderContext};
-pub use pipeline::{RenderPipeline, RenderViewport};
 pub use egui_integration::EguiRenderer;
+pub use pipeline::{RenderPipeline, RenderViewport};

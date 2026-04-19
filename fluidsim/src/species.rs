@@ -7,7 +7,7 @@ use ahash::AHashMap;
 use std::sync::Arc;
 
 /// A stable identifier for a chemical species, derived from the species name.
-/// 
+///
 /// This is a 64-bit hash of the species name string, providing:
 /// - Fast equality comparison
 /// - Stable identity across serialization
@@ -81,7 +81,7 @@ impl SpeciesRegistry {
     /// Panics if a species with this name is already registered.
     pub fn register(&mut self, name: &str, diffusion_coefficient: f32) -> SpeciesId {
         let id = SpeciesId::from_name(name);
-        
+
         if self.id_to_index.contains_key(&id) {
             panic!("Species '{}' is already registered", name);
         }
@@ -89,7 +89,7 @@ impl SpeciesRegistry {
         let index = self.species.len();
         let name_arc: Arc<str> = name.into();
         let charge = infer_ionic_charge(name);
-        
+
         self.species.push(SpeciesInfo {
             id,
             name: name_arc.clone(),
@@ -141,7 +141,10 @@ impl SpeciesRegistry {
 
     /// Get diffusion coefficients as a dense array for GPU upload.
     pub fn diffusion_coefficients(&self) -> Vec<f32> {
-        self.species.iter().map(|s| s.diffusion_coefficient).collect()
+        self.species
+            .iter()
+            .map(|s| s.diffusion_coefficient)
+            .collect()
     }
 
     /// Get ionic charges as a dense array for GPU upload.
@@ -151,7 +154,8 @@ impl SpeciesRegistry {
 
     /// Return the largest per-species diffusion coefficient (for CFL checks).
     pub fn max_diffusion_coefficient(&self) -> f32 {
-        self.species.iter()
+        self.species
+            .iter()
             .map(|s| s.diffusion_coefficient)
             .fold(0.0_f32, f32::max)
     }
@@ -185,7 +189,8 @@ fn parse_suffix_charge(name: &str) -> Option<i32> {
     }
 
     let prefix = &trimmed[..trimmed.len() - sign.len_utf8()];
-    let trailing_digits: String = prefix.chars()
+    let trailing_digits: String = prefix
+        .chars()
         .rev()
         .take_while(|c| c.is_ascii_digit())
         .collect::<String>()

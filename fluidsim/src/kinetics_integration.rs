@@ -23,13 +23,12 @@
 
 use crate::gpu::GpuReactionRule;
 use crate::semantic::{SemanticConfig, SemanticSnapshotBuilder};
-use crate::species::SpeciesRegistry;
 use crate::solid::MaterialRegistry;
-use kinetics::{
-    KineticsConfig, KineticsEngine, KineticsError, ReactionKineticsModel,
-    SemanticUpdate,
-};
+use crate::species::SpeciesRegistry;
 use anyhow::Result;
+use kinetics::{
+    KineticsConfig, KineticsEngine, KineticsError, ReactionKineticsModel, SemanticUpdate,
+};
 
 /// State for kinetics integration.
 ///
@@ -37,25 +36,25 @@ use anyhow::Result;
 pub struct KineticsIntegration {
     /// The kinetics engine
     engine: KineticsEngine,
-    
+
     /// Semantic snapshot builder
     snapshot_builder: SemanticSnapshotBuilder,
-    
+
     /// Configuration for semantic snapshots
     semantic_config: SemanticConfig,
-    
+
     /// Time accumulator since last evaluation (simulated seconds)
     time_since_last_evaluation: f64,
-    
+
     /// Interval between evaluations (simulated seconds)
     evaluation_interval: f64,
-    
+
     /// Last returned semantic update (cached)
     last_update: Option<SemanticUpdate>,
-    
+
     /// Last snapshot time
     last_snapshot_time: f64,
-    
+
     /// Statistics
     stats: IntegrationStats,
 }
@@ -92,7 +91,7 @@ impl KineticsIntegration {
     ) -> Result<Self, KineticsError> {
         let engine = KineticsEngine::new(kinetics_config.clone())?;
         let snapshot_builder = SemanticSnapshotBuilder::new(semantic_config.clone());
-        
+
         Ok(Self {
             engine,
             snapshot_builder,
@@ -142,7 +141,7 @@ impl KineticsIntegration {
         // Build snapshot
         let snapshot_start = std::time::Instant::now();
         let dt_window = sim_time - self.last_snapshot_time;
-        
+
         let snapshot = self.snapshot_builder.build(
             fine_width,
             fine_height,
@@ -155,49 +154,49 @@ impl KineticsIntegration {
             species_registry,
             material_registry,
         );
-        
+
         let snapshot_time = snapshot_start.elapsed().as_secs_f64() * 1000.0;
         self.stats.snapshots_generated += 1;
         self.update_avg_snapshot_time(snapshot_time);
-        
+
         log::debug!(
             "Generated semantic snapshot: {} tiles, {:.2}ms",
             snapshot.tile_count(),
             snapshot_time
         );
-        
+
         // Evaluate
         self.stats.evaluations_attempted += 1;
         let eval_start = std::time::Instant::now();
-        
+
         let result = self.engine.evaluate(&snapshot);
-        
+
         let eval_time = eval_start.elapsed().as_secs_f64() * 1000.0;
         self.update_avg_evaluation_time(eval_time);
-        
+
         match result {
             Ok(update) => {
                 self.stats.evaluations_succeeded += 1;
-                
+
                 log::debug!(
                     "Kinetics evaluation: {} updates, {:.2}ms",
                     update.update_count(),
                     eval_time
                 );
-                
+
                 // Reset accumulator
                 self.time_since_last_evaluation = 0.0;
                 self.last_snapshot_time = sim_time;
-                
+
                 // Cache the update
                 self.last_update = Some(update);
-                
+
                 Ok(self.last_update.as_ref().unwrap())
             }
             Err(e) => {
                 self.stats.evaluations_failed += 1;
                 log::warn!("Kinetics evaluation failed: {}", e);
-                
+
                 // On error, return last good update or a default no-op
                 if let Some(ref update) = self.last_update {
                     Ok(update)
@@ -269,13 +268,13 @@ impl KineticsIntegration {
 
     fn update_avg_snapshot_time(&mut self, time_ms: f64) {
         let n = self.stats.snapshots_generated as f64;
-        self.stats.avg_snapshot_time_ms = 
+        self.stats.avg_snapshot_time_ms =
             (self.stats.avg_snapshot_time_ms * (n - 1.0) + time_ms) / n;
     }
 
     fn update_avg_evaluation_time(&mut self, time_ms: f64) {
         let n = self.stats.evaluations_attempted as f64;
-        self.stats.avg_evaluation_time_ms = 
+        self.stats.avg_evaluation_time_ms =
             (self.stats.avg_evaluation_time_ms * (n - 1.0) + time_ms) / n;
     }
 }
@@ -284,7 +283,10 @@ impl std::fmt::Debug for KineticsIntegration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KineticsIntegration")
             .field("evaluation_interval", &self.evaluation_interval)
-            .field("time_since_last_evaluation", &self.time_since_last_evaluation)
+            .field(
+                "time_since_last_evaluation",
+                &self.time_since_last_evaluation,
+            )
             .field("has_update", &self.last_update.is_some())
             .field("stats", &self.stats)
             .finish()
@@ -368,7 +370,11 @@ impl SemanticUpdateApplicator {
         for boundary_update in &update.boundary_updates {
             if !boundary_update.is_noop() {
                 if self.verbose {
-                    log::debug!("Boundary {} update: {:?}", boundary_update.boundary_id, boundary_update);
+                    log::debug!(
+                        "Boundary {} update: {:?}",
+                        boundary_update.boundary_id,
+                        boundary_update
+                    );
                 }
                 applied_count += 1;
             }
@@ -407,7 +413,11 @@ impl SemanticUpdateApplicator {
             }
         }
 
-        log::debug!("Applied {} semantic updates, {} GPU reaction rules", applied_count, gpu_rules.len());
+        log::debug!(
+            "Applied {} semantic updates, {} GPU reaction rules",
+            applied_count,
+            gpu_rules.len()
+        );
         (applied_count, gpu_rules)
     }
 
@@ -423,7 +433,9 @@ impl SemanticUpdateApplicator {
             if name.is_empty() {
                 Some(None)
             } else {
-                species_registry.index_of_name(name).map(|idx| Some(idx as u32))
+                species_registry
+                    .index_of_name(name)
+                    .map(|idx| Some(idx as u32))
             }
         };
 
@@ -432,7 +444,9 @@ impl SemanticUpdateApplicator {
         let product_a_idx = lookup_optional_species(&directive.product_a);
         let product_b_idx = lookup_optional_species(&directive.product_b);
         let catalyst_idx = match directive.catalyst.as_deref() {
-            Some(name) => species_registry.index_of_name(name).map(|idx| Some(idx as u32)),
+            Some(name) => species_registry
+                .index_of_name(name)
+                .map(|idx| Some(idx as u32)),
             None => Some(None),
         };
 

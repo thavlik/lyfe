@@ -46,7 +46,9 @@ impl LeanBridge {
         ];
         for candidate in &workspace_candidates {
             if candidate.is_file() {
-                let abs = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+                let abs = candidate
+                    .canonicalize()
+                    .unwrap_or_else(|_| candidate.clone());
                 log::info!("Lean binary from workspace: {}", abs.display());
                 return Ok(Self { binary_path: abs });
             }
@@ -95,9 +97,10 @@ impl LeanBridge {
 
         // Write snapshot to stdin
         {
-            let stdin = child.stdin.as_mut().ok_or_else(|| {
-                KineticsError::LeanError("Failed to open stdin pipe".to_string())
-            })?;
+            let stdin = child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| KineticsError::LeanError("Failed to open stdin pipe".to_string()))?;
             stdin.write_all(input_json.as_bytes()).map_err(|e| {
                 KineticsError::LeanError(format!("Failed to write to stdin: {}", e))
             })?;
@@ -117,9 +120,8 @@ impl LeanBridge {
             )));
         }
 
-        let stdout = String::from_utf8(output.stdout).map_err(|e| {
-            KineticsError::LeanError(format!("Invalid UTF-8 from Lean: {}", e))
-        })?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|e| KineticsError::LeanError(format!("Invalid UTF-8 from Lean: {}", e)))?;
 
         if stdout.trim().is_empty() {
             return Err(KineticsError::LeanError(

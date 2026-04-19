@@ -36,22 +36,34 @@ fn main() {
     let width = config.width;
     let height = config.height;
 
-    let mut simulation = Simulation::new_acid_base(config).expect("acid-base sim should initialize");
-    let h_idx = simulation.species_registry().index_of_name("H+").expect("H+ registered");
-    let oh_idx = simulation.species_registry().index_of_name("OH-").expect("OH- registered");
+    let mut simulation =
+        Simulation::new_acid_base(config).expect("acid-base sim should initialize");
+    let h_idx = simulation
+        .species_registry()
+        .index_of_name("H+")
+        .expect("H+ registered");
+    let oh_idx = simulation
+        .species_registry()
+        .index_of_name("OH-")
+        .expect("OH- registered");
 
     let initial = simulation.render_state().expect("initial render state");
     let initial_h_center = mean_in_center_window(&initial.concentrations[h_idx], width, height, 1);
-    let initial_oh_center = mean_in_center_window(&initial.concentrations[oh_idx], width, height, 1);
+    let initial_oh_center =
+        mean_in_center_window(&initial.concentrations[oh_idx], width, height, 1);
     let initial_temp_center = mean_in_center_window(&initial.temperatures, width, height, 1);
 
     for _ in 0..36 {
-        simulation.step(1.0 / 60.0).expect("simulation step should succeed");
+        simulation
+            .step(1.0 / 60.0)
+            .expect("simulation step should succeed");
     }
 
     let final_state = simulation.render_state().expect("final render state");
-    let final_h_center = mean_in_center_window(&final_state.concentrations[h_idx], width, height, 1);
-    let final_oh_center = mean_in_center_window(&final_state.concentrations[oh_idx], width, height, 1);
+    let final_h_center =
+        mean_in_center_window(&final_state.concentrations[h_idx], width, height, 1);
+    let final_oh_center =
+        mean_in_center_window(&final_state.concentrations[oh_idx], width, height, 1);
     let final_temp_center = mean_in_center_window(&final_state.temperatures, width, height, 1);
 
     println!("initial_h_center={initial_h_center}");

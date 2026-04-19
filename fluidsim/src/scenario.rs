@@ -3,11 +3,11 @@
 //! Provides a high-level API for setting up simulation initial conditions,
 //! including species registration, solid geometry, and initial concentrations.
 
-use crate::grid::{Grid, CellCoord};
 use crate::enzyme::{EnzymeEntity, EnzymeField};
+use crate::grid::{CellCoord, Grid};
 use crate::leak::LeakChannel;
 use crate::solid::{MaterialId, MaterialRegistry, SolidGeometry};
-use crate::species::{SpeciesRegistry, SpeciesConcentrations};
+use crate::species::{SpeciesConcentrations, SpeciesRegistry};
 use ahash::AHashMap;
 
 /// Default diffusion coefficient for aqueous ions (scaled for simulation).
@@ -35,10 +35,10 @@ impl Scenario {
     pub fn compile_concentrations(&self) -> Vec<Vec<f32>> {
         let cell_count = self.grid.cell_count();
         let species_count = self.species_registry.count();
-        
+
         // Initialize all to zero
         let mut concentrations = vec![vec![0.0f32; cell_count]; species_count];
-        
+
         // Fill in non-zero values
         for (&cell_index, cell_conc) in &self.initial_concentrations {
             for (species_id, conc) in cell_conc.iter() {
@@ -47,13 +47,14 @@ impl Scenario {
                 }
             }
         }
-        
+
         concentrations
     }
 
     /// Compile solid mask to dense array.
     pub fn compile_solid_mask(&self) -> Vec<u32> {
-        self.solid_geometry.material_ids
+        self.solid_geometry
+            .material_ids
             .iter()
             .map(|m| if m.0 != 0 { 1u32 } else { 0u32 })
             .collect()
@@ -61,7 +62,11 @@ impl Scenario {
 
     /// Compile material IDs to dense array.
     pub fn compile_material_ids(&self) -> Vec<u32> {
-        self.solid_geometry.material_ids.iter().map(|m| m.0).collect()
+        self.solid_geometry
+            .material_ids
+            .iter()
+            .map(|m| m.0)
+            .collect()
     }
 
     /// Compile temperatures to dense array (already dense, just clone).
@@ -121,23 +126,29 @@ impl ScenarioBuilder {
     /// Fill a rectangular region with solid material.
     pub fn fill_solid_rect(
         mut self,
-        x0: u32, y0: u32,
-        x1: u32, y1: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
         material: MaterialId,
     ) -> Self {
-        self.solid_geometry.fill_rect(x0, y0, x1, y1, self.grid.width, material);
+        self.solid_geometry
+            .fill_rect(x0, y0, x1, y1, self.grid.width, material);
         self
     }
 
     /// Fill a hollow rectangle with solid material.
     pub fn fill_hollow_rect(
         mut self,
-        x0: u32, y0: u32,
-        x1: u32, y1: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
         thickness: u32,
         material: MaterialId,
     ) -> Self {
-        self.solid_geometry.fill_hollow_rect(x0, y0, x1, y1, thickness, self.grid.width, material);
+        self.solid_geometry
+            .fill_hollow_rect(x0, y0, x1, y1, thickness, self.grid.width, material);
         self
     }
 
@@ -161,8 +172,10 @@ impl ScenarioBuilder {
     /// Fill a rectangular region with a species concentration.
     pub fn fill_concentration_rect(
         mut self,
-        x0: u32, y0: u32,
-        x1: u32, y1: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
         species_name: &str,
         concentration: f64,
     ) -> Self {
@@ -191,8 +204,10 @@ impl ScenarioBuilder {
     /// Set temperature for a rectangular region.
     pub fn fill_temperature_rect(
         mut self,
-        x0: u32, y0: u32,
-        x1: u32, y1: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
         temperature: f32,
     ) -> Self {
         for coord in self.grid.iter_rect(x0, y0, x1, y1) {
@@ -271,72 +286,81 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
     let wall_thickness = 4u32;
     let inner_size = (width.min(height) / 2).max(64); // At least 64 units inside
     let outer_size = inner_size + 2 * wall_thickness;
-    
+
     let center_x = width / 2;
     let center_y = height / 2;
-    
+
     let outer_x0 = center_x - outer_size / 2;
     let outer_y0 = center_y - outer_size / 2;
     let outer_x1 = outer_x0 + outer_size;
     let outer_y1 = outer_y0 + outer_size;
-    
+
     let inner_x0 = outer_x0 + wall_thickness;
     let inner_y0 = outer_y0 + wall_thickness;
     let inner_x1 = outer_x1 - wall_thickness;
     let inner_y1 = outer_y1 - wall_thickness;
-    
+
     // Build the scenario
     let builder = ScenarioBuilder::new(width, height)
         // Register species (only the ones we use)
         .register_species("Na+")
         .register_species("K+")
         .register_species("Cl-");
-    
+
     // Register titanium material
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
-    
+
     // Create the hollow titanium square
-    let builder = builder.fill_hollow_rect(outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium);
-    
+    let builder = builder.fill_hollow_rect(
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        wall_thickness,
+        titanium,
+    );
+
     // Initialize temperatures:
     // - Outside box water: 280.0K
     // - Titanium walls: 280.0K
     // - Top-left inside box: 318.15K
     // - Bottom-right inside box: 288.0K
     let mut builder = builder.fill_temperature(280.0); // Default: outside water + titanium at 280K
-    
+
     // Inside the hollow square, split diagonally:
     // - Top left (above diagonal from top-right to bottom-left): 1.0 M Na+, 1.0 M Cl-
     // - Bottom right (below diagonal): 1.0 M K+, 1.0 M Cl-
     // Outside the box: pure water (no concentration)
-    
+
     let na_id = builder.species_registry.id_of("Na+").unwrap();
     let k_id = builder.species_registry.id_of("K+").unwrap();
     let cl_id = builder.species_registry.id_of("Cl-").unwrap();
-    
+
     let inner_width = (inner_x1 - inner_x0) as f32;
     let inner_height = (inner_y1 - inner_y0) as f32;
-    
+
     for y in inner_y0..inner_y1 {
         for x in inner_x0..inner_x1 {
             let index = builder.grid.index_of(CellCoord::new(x, y));
             if builder.solid_geometry.is_solid(index) {
                 continue;
             }
-            
+
             // Normalized position within inner region (0..1)
             let nx = (x - inner_x0) as f32 / inner_width;
             let ny = (y - inner_y0) as f32 / inner_height;
-            
+
             // Diagonal line from top-right (1,0) to bottom-left (0,1)
             // Points where nx + ny < 1 are in the top-left triangle
             if nx + ny < 1.0 {
                 // Top-left: Na+ and Cl-
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(na_id, 1.0);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(cl_id, 1.0);
@@ -344,11 +368,13 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
                 builder.initial_temperatures[index] = 318.15;
             } else {
                 // Bottom-right: K+ and Cl-
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(k_id, 1.0);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(cl_id, 1.0);
@@ -357,7 +383,7 @@ pub fn create_demo_scenario(width: u32, height: u32) -> Scenario {
             }
         }
     }
-    
+
     builder.build()
 }
 
@@ -394,7 +420,12 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
 
     let builder = builder.fill_hollow_rect(
-        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        wall_thickness,
+        titanium,
     );
 
     let mut builder = builder.fill_temperature(278.15); // 5°C uniform
@@ -419,21 +450,25 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
 
             if nx + ny < 1.0 {
                 // Top-left: acidic — 1.0 M H⁺, 0.5 M SO₄²⁻
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(h_id, 1.0);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(so4_id, 0.5);
             } else {
                 // Bottom-right: basic — 1.0 M Na⁺, 1.0 M OH⁻
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(na_id, 1.0);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(oh_id, 1.0);
@@ -449,8 +484,17 @@ pub fn create_acid_base_scenario(width: u32, height: u32) -> Scenario {
 /// Uses the same hollow-box geometry as the basic demo, but fills the entire
 /// interior with glucose, ATP, and a low concentration of hexokinase.
 pub fn create_catalyst_scenario(width: u32, height: u32) -> Scenario {
-    let (wall_thickness, outer_x0, outer_y0, outer_x1, outer_y1, inner_x0, inner_y0, inner_x1, inner_y1) =
-        central_box_bounds(width, height);
+    let (
+        wall_thickness,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        inner_x0,
+        inner_y0,
+        inner_x1,
+        inner_y1,
+    ) = central_box_bounds(width, height);
 
     let builder = ScenarioBuilder::new(width, height)
         .register_species("Glucose")
@@ -462,7 +506,12 @@ pub fn create_catalyst_scenario(width: u32, height: u32) -> Scenario {
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
 
     let builder = builder.fill_hollow_rect(
-        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        wall_thickness,
+        titanium,
     );
 
     let mut builder = builder.fill_temperature(280.0);
@@ -481,15 +530,18 @@ pub fn create_catalyst_scenario(width: u32, height: u32) -> Scenario {
                 continue;
             }
 
-            builder.initial_concentrations
+            builder
+                .initial_concentrations
                 .entry(index)
                 .or_default()
                 .set(glucose_id, 1.0);
-            builder.initial_concentrations
+            builder
+                .initial_concentrations
                 .entry(index)
                 .or_default()
                 .set(atp_id, 1.0);
-            builder.initial_concentrations
+            builder
+                .initial_concentrations
                 .entry(index)
                 .or_default()
                 .set(hexokinase_id, 0.01);
@@ -508,8 +560,17 @@ pub fn create_catalyst_scenario(width: u32, height: u32) -> Scenario {
 /// Starts from the catalyst demo chemistry and geometry, but models
 /// hexokinase as six drifting entities rather than a dissolved catalyst.
 pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
-    let (wall_thickness, outer_x0, outer_y0, outer_x1, outer_y1, inner_x0, inner_y0, inner_x1, inner_y1) =
-        central_box_bounds(width, height);
+    let (
+        wall_thickness,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        inner_x0,
+        inner_y0,
+        inner_x1,
+        inner_y1,
+    ) = central_box_bounds(width, height);
 
     let builder = ScenarioBuilder::new(width, height)
         .register_species("Glucose")
@@ -519,7 +580,12 @@ pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
 
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
     let builder = builder.fill_hollow_rect(
-        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        wall_thickness,
+        titanium,
     );
     let mut builder = builder.fill_temperature(293.15);
 
@@ -538,11 +604,13 @@ pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
                 continue;
             }
 
-            builder.initial_concentrations
+            builder
+                .initial_concentrations
                 .entry(index)
                 .or_default()
                 .set(glucose_id, 1.0);
-            builder.initial_concentrations
+            builder
+                .initial_concentrations
                 .entry(index)
                 .or_default()
                 .set(atp_id, 1.0);
@@ -571,7 +639,8 @@ pub fn create_enzyme_scenario(width: u32, height: u32) -> Scenario {
         rotational_diffusion: 0.75,
     };
 
-    let mut seed = width.wrapping_mul(73_856_093) ^ height.wrapping_mul(19_349_663) ^ 0xA5A5_1F1Fu32;
+    let mut seed =
+        width.wrapping_mul(73_856_093) ^ height.wrapping_mul(19_349_663) ^ 0xA5A5_1F1Fu32;
     let mut entities = Vec::with_capacity(6);
     let minimum_spacing = 14.0f32;
 
@@ -648,7 +717,12 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
 
     let builder = builder.fill_hollow_rect(
-        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        wall_thickness,
+        titanium,
     );
 
     let mut builder = builder.fill_temperature(278.15);
@@ -674,29 +748,35 @@ pub fn create_buffers_scenario(width: u32, height: u32) -> Scenario {
 
             if nx + ny < 1.0 {
                 // Top-left: sodium acetate + acetic acid buffer near pKa.
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(na_id, 0.35);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(h_id, 1.8e-5);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(acetate_id, 0.35);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(acetic_acid_id, 0.35);
             } else {
                 // Bottom-right: 0.2 M NaOH.
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(na_id, 0.2);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(oh_id, 0.2);
@@ -739,7 +819,12 @@ pub fn create_leak_scenario(width: u32, height: u32) -> Scenario {
     let (builder, titanium) = builder.register_material("titanium", [0.6, 0.6, 0.65, 1.0]);
 
     let builder = builder.fill_hollow_rect(
-        outer_x0, outer_y0, outer_x1, outer_y1, wall_thickness, titanium,
+        outer_x0,
+        outer_y0,
+        outer_x1,
+        outer_y1,
+        wall_thickness,
+        titanium,
     );
 
     let mut builder = builder.fill_temperature(278.15);
@@ -761,11 +846,13 @@ pub fn create_leak_scenario(width: u32, height: u32) -> Scenario {
 
             let inside_box = x >= inner_x0 && x < inner_x1 && y >= inner_y0 && y < inner_y1;
             if !inside_box {
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(k_id, 1.0);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(cl_id, 1.0);
@@ -787,28 +874,34 @@ pub fn create_leak_scenario(width: u32, height: u32) -> Scenario {
             let ny = (y - inner_y0) as f32 / inner_height;
 
             if nx + ny < 1.0 {
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(na_id, 0.35);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(h_id, 1.8e-5);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(acetate_id, 0.350018);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(acetic_acid_id, 0.349982);
             } else {
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(na_id, 0.2);
-                builder.initial_concentrations
+                builder
+                    .initial_concentrations
                     .entry(index)
                     .or_default()
                     .set(oh_id, 0.2);
@@ -827,13 +920,9 @@ pub fn create_leak_scenario(width: u32, height: u32) -> Scenario {
             y as i32,
             0,
         ));
-        builder.leak_channels.push(LeakChannel::new(
-            4.5,
-            na_id,
-            inner_x1 as i32,
-            y as i32,
-            0,
-        ));
+        builder
+            .leak_channels
+            .push(LeakChannel::new(4.5, na_id, inner_x1 as i32, y as i32, 0));
     }
 
     builder.build()

@@ -87,9 +87,18 @@ fn main() {
         .map(|species| species.charge)
         .collect();
 
-    let k_idx = simulation.species_registry().index_of_name("K+").expect("K+ registered");
-    let na_idx = simulation.species_registry().index_of_name("Na+").expect("Na+ registered");
-    let cl_idx = simulation.species_registry().index_of_name("Cl-").expect("Cl- registered");
+    let k_idx = simulation
+        .species_registry()
+        .index_of_name("K+")
+        .expect("K+ registered");
+    let na_idx = simulation
+        .species_registry()
+        .index_of_name("Na+")
+        .expect("Na+ registered");
+    let cl_idx = simulation
+        .species_registry()
+        .index_of_name("Cl-")
+        .expect("Cl- registered");
 
     let wall_thickness = 4u32;
     let inner_size = (width.min(height) / 2).max(64);
@@ -156,7 +165,9 @@ fn main() {
     );
 
     for _ in 0..72 {
-        simulation.step(1.0 / 60.0).expect("simulation step should succeed");
+        simulation
+            .step(1.0 / 60.0)
+            .expect("simulation step should succeed");
     }
 
     let final_state = simulation.render_state().expect("final render state");
@@ -164,8 +175,11 @@ fn main() {
     let final_na_total = fluid_total(&final_state.concentrations[na_idx], &final_state.solid_mask);
     let final_cl_total = fluid_total(&final_state.concentrations[cl_idx], &final_state.solid_mask);
     let final_spectator_charge = final_k_total + final_na_total - final_cl_total;
-    let (final_max_abs_charge, final_mean_abs_charge) =
-        charge_metrics(&final_state.concentrations, &charges, &final_state.solid_mask);
+    let (final_max_abs_charge, final_mean_abs_charge) = charge_metrics(
+        &final_state.concentrations,
+        &charges,
+        &final_state.solid_mask,
+    );
     let final_k_inside = region_total(
         &final_state.concentrations[k_idx],
         &final_state.solid_mask,

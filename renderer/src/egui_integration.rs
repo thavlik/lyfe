@@ -4,8 +4,8 @@
 
 use anyhow::Result;
 use ash::vk;
-use egui::{Context, FullOutput, ClippedPrimitive, TexturesDelta};
-use egui_ash_renderer::{Renderer, Options};
+use egui::{ClippedPrimitive, Context, FullOutput, TexturesDelta};
+use egui_ash_renderer::{Options, Renderer};
 use egui_winit::State;
 use winit::window::Window;
 
@@ -29,14 +29,7 @@ impl EguiRenderer {
     pub fn new(render_ctx: &RenderContext, window: &Window) -> Result<Self> {
         let ctx = Context::default();
         let viewport_id = ctx.viewport_id();
-        let state = State::new(
-            ctx.clone(),
-            viewport_id,
-            window,
-            None,
-            None,
-            None,
-        );
+        let state = State::new(ctx.clone(), viewport_id, window, None, None, None);
 
         // Create egui-ash-renderer with default allocator
         // (uses std::sync::Mutex internally, our RenderContext uses parking_lot::Mutex)
@@ -70,15 +63,18 @@ impl EguiRenderer {
 
     pub fn end_frame(&mut self, window: &Window) -> FullOutput {
         let output = self.ctx.end_pass();
-        self.state.handle_platform_output(window, output.platform_output.clone());
-        
+        self.state
+            .handle_platform_output(window, output.platform_output.clone());
+
         // Tessellate and cache for rendering
-        let primitives = self.ctx.tessellate(output.shapes.clone(), output.pixels_per_point);
+        let primitives = self
+            .ctx
+            .tessellate(output.shapes.clone(), output.pixels_per_point);
         self.cached_output = Some(CachedEguiOutput {
             primitives,
             textures_delta: output.textures_delta.clone(),
         });
-        
+
         output
     }
 
@@ -109,12 +105,8 @@ impl EguiRenderer {
         extent: vk::Extent2D,
     ) -> Result<()> {
         if let Some(output) = &self.cached_output {
-            self.renderer.cmd_draw(
-                cmd,
-                extent,
-                self.ctx.pixels_per_point(),
-                &output.primitives,
-            )?;
+            self.renderer
+                .cmd_draw(cmd, extent, self.ctx.pixels_per_point(), &output.primitives)?;
         }
         Ok(())
     }

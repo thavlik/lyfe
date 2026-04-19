@@ -85,7 +85,10 @@ pub struct MaterialFraction {
 
 impl MaterialFraction {
     pub fn new(material_id: MaterialId, fraction: f32) -> Self {
-        Self { material_id, fraction }
+        Self {
+            material_id,
+            fraction,
+        }
     }
 }
 
@@ -100,14 +103,12 @@ pub struct SemanticTile {
     pub y: u32,
 
     // --- Composition fractions ---
-    
     /// Fraction of cells that are fluid (0.0 to 1.0)
     pub fluid_fraction: f32,
     /// Fraction of cells that are solid (0.0 to 1.0)
     pub solid_fraction: f32,
 
     // --- Thermodynamic state ---
-    
     /// Mean temperature across fluid cells in this tile (Kelvin)
     pub mean_temperature_kelvin: f64,
     /// Min temperature in tile (Kelvin)
@@ -118,7 +119,6 @@ pub struct SemanticTile {
     pub temperature_variance: f64,
 
     // --- Species concentrations ---
-    
     /// Mean molarity for each detected species in this tile
     pub species_mean_molarity: Vec<SpeciesAmount>,
     /// Total moles for each species (for conservation tracking)
@@ -127,12 +127,10 @@ pub struct SemanticTile {
     pub species_max_gradient: Vec<SpeciesAmount>,
 
     // --- Material composition ---
-    
     /// Fraction of tile occupied by each material type
     pub material_fractions: Vec<MaterialFraction>,
 
     // --- Semantic flags ---
-    
     /// Semantic state flags for this tile
     pub flags: TileFlags,
 }
@@ -260,7 +258,6 @@ pub struct SemanticSnapshot {
     pub dt_window_seconds: f64,
 
     // --- Coarse grid dimensions ---
-    
     /// Width of the coarse semantic grid
     pub coarse_width: u32,
     /// Height of the coarse semantic grid
@@ -269,31 +266,26 @@ pub struct SemanticSnapshot {
     pub tile_size: u32,
 
     // --- Fine grid dimensions (for context) ---
-    
     /// Width of the fine simulation grid
     pub fine_width: u32,
     /// Height of the fine simulation grid
     pub fine_height: u32,
 
     // --- Tile data ---
-    
     /// Coarse semantic tiles (row-major order)
     pub tiles: Vec<SemanticTile>,
 
     // --- Boundary data ---
-    
     /// Important boundaries between tiles/regions
     pub boundaries: Vec<BoundarySummary>,
 
     // --- Registry snapshots ---
-    
     /// Species registry snapshot
     pub species_table: SpeciesTableSnapshot,
     /// Materials registry snapshot
     pub materials_table: MaterialsTableSnapshot,
 
     // --- Global statistics ---
-    
     /// Total moles of each species across entire domain
     pub global_species_totals: Vec<SpeciesAmount>,
     /// Domain-wide mean temperature (Kelvin)
@@ -313,7 +305,7 @@ impl SemanticSnapshot {
     ) -> Self {
         let tile_count = (coarse_width * coarse_height) as usize;
         let mut tiles = Vec::with_capacity(tile_count);
-        
+
         for y in 0..coarse_height {
             for x in 0..coarse_width {
                 let tile_id = y * coarse_width + x;

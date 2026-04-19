@@ -125,7 +125,9 @@ impl CellFlags {
     }
 
     pub fn solid() -> Self {
-        Self { flags: Self::SOLID_BIT }
+        Self {
+            flags: Self::SOLID_BIT,
+        }
     }
 
     #[inline]

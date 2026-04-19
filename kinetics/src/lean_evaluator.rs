@@ -163,7 +163,10 @@ impl LeanEvaluator {
     }
 
     /// Convert a Lean rule into a `ReactionDirective`.
-    fn to_directive(rule: LeanReactionRule, index: u32) -> Result<ReactionDirective, KineticsError> {
+    fn to_directive(
+        rule: LeanReactionRule,
+        index: u32,
+    ) -> Result<ReactionDirective, KineticsError> {
         let (kinetics_model, michaelis_menten) = match rule.kinetic_model {
             LeanKineticsModel::MassAction => (ReactionKineticsModel::MassAction, None),
             LeanKineticsModel::MichaelisMenten => {
@@ -176,8 +179,7 @@ impl LeanEvaluator {
                 if km_reactant_a <= 0.0 {
                     return Err(KineticsError::LeanError(format!(
                         "Lean rule '{}' declared non-positive km_reactant_a={}",
-                        rule.reaction_name,
-                        km_reactant_a
+                        rule.reaction_name, km_reactant_a
                     )));
                 }
                 (
@@ -238,14 +240,13 @@ impl RuleEvaluator for LeanEvaluator {
         let output_json = self.bridge.evaluate_json(&input_json)?;
 
         // Deserialize response
-        let result: LeanEvalResult =
-            serde_json::from_str(&output_json).map_err(|e| {
-                KineticsError::LeanError(format!(
-                    "Failed to parse Lean output: {}. Raw: {}",
-                    e,
-                    &output_json[..output_json.len().min(200)]
-                ))
-            })?;
+        let result: LeanEvalResult = serde_json::from_str(&output_json).map_err(|e| {
+            KineticsError::LeanError(format!(
+                "Failed to parse Lean output: {}. Raw: {}",
+                e,
+                &output_json[..output_json.len().min(200)]
+            ))
+        })?;
 
         // Log diagnostics from Lean
         for diag in &result.diagnostics {

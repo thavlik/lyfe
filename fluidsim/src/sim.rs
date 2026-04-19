@@ -12,14 +12,16 @@ use crate::grid::Grid;
 use crate::inspect::{InspectionResult, Inspector};
 use crate::kinetics_integration::{KineticsIntegration, SemanticUpdateApplicator};
 use crate::leak::LeakChannel;
-use crate::scenario::{Scenario, create_demo_scenario, create_acid_base_scenario, create_buffers_scenario, create_catalyst_scenario, create_enzyme_scenario, create_leak_scenario};
+use crate::scenario::{
+    Scenario, create_acid_base_scenario, create_buffers_scenario, create_catalyst_scenario,
+    create_demo_scenario, create_enzyme_scenario, create_leak_scenario,
+};
 use crate::solid::MaterialRegistry;
 use crate::species::SpeciesRegistry;
 
 use anyhow::Result;
 use ash::vk;
 use std::time::Duration;
-
 
 /// Configuration for the simulation.
 #[derive(Debug, Clone)]
@@ -150,7 +152,10 @@ pub struct Simulation {
     inspection_readbacks_enabled: bool,
 }
 
-fn effective_charge_correction_strength(configured_strength: f32, leak_channels: &[LeakChannel]) -> f32 {
+fn effective_charge_correction_strength(
+    configured_strength: f32,
+    leak_channels: &[LeakChannel],
+) -> f32 {
     if leak_channels.is_empty() {
         configured_strength
     } else {
@@ -215,7 +220,11 @@ impl Simulation {
 
         gpu.init_reaction_pipeline(&temperatures)?;
         if !scenario.leak_channels.is_empty() {
-            gpu.init_leak_pipeline(&scenario.leak_channels, &scenario.species_registry, &solid_mask)?;
+            gpu.init_leak_pipeline(
+                &scenario.leak_channels,
+                &scenario.species_registry,
+                &solid_mask,
+            )?;
         }
         if !scenario.enzyme_entities.is_empty() {
             gpu.init_enzyme_pipeline(&scenario.enzyme_entities, &scenario.species_registry)?;
@@ -324,8 +333,10 @@ impl Simulation {
             return;
         }
 
-        let next_interval = (kinetics.evaluation_interval() * 2.0)
-            .clamp(Self::MIN_KINETICS_INTERVAL_SECONDS, Self::MAX_KINETICS_INTERVAL_SECONDS);
+        let next_interval = (kinetics.evaluation_interval() * 2.0).clamp(
+            Self::MIN_KINETICS_INTERVAL_SECONDS,
+            Self::MAX_KINETICS_INTERVAL_SECONDS,
+        );
         kinetics.set_evaluation_interval(next_interval);
     }
 
@@ -335,7 +346,10 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
-    pub fn new_demo_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+    pub fn new_demo_with_shared_gpu_context(
+        config: SimulationConfig,
+        context: SharedGpuContext,
+    ) -> Result<Self> {
         let scenario = create_demo_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
@@ -346,7 +360,10 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
-    pub fn new_acid_base_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+    pub fn new_acid_base_with_shared_gpu_context(
+        config: SimulationConfig,
+        context: SharedGpuContext,
+    ) -> Result<Self> {
         let scenario = create_acid_base_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
@@ -357,7 +374,10 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
-    pub fn new_buffers_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+    pub fn new_buffers_with_shared_gpu_context(
+        config: SimulationConfig,
+        context: SharedGpuContext,
+    ) -> Result<Self> {
         let scenario = create_buffers_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
@@ -368,7 +388,10 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
-    pub fn new_catalyst_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+    pub fn new_catalyst_with_shared_gpu_context(
+        config: SimulationConfig,
+        context: SharedGpuContext,
+    ) -> Result<Self> {
         let scenario = create_catalyst_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
@@ -379,7 +402,10 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
-    pub fn new_enzyme_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+    pub fn new_enzyme_with_shared_gpu_context(
+        config: SimulationConfig,
+        context: SharedGpuContext,
+    ) -> Result<Self> {
         let scenario = create_enzyme_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
@@ -390,7 +416,10 @@ impl Simulation {
         Self::from_scenario(scenario, config)
     }
 
-    pub fn new_leak_with_shared_gpu_context(config: SimulationConfig, context: SharedGpuContext) -> Result<Self> {
+    pub fn new_leak_with_shared_gpu_context(
+        config: SimulationConfig,
+        context: SharedGpuContext,
+    ) -> Result<Self> {
         let scenario = create_leak_scenario(config.width, config.height);
         Self::from_scenario_with_shared_gpu_context(scenario, config, context)
     }
@@ -455,7 +484,9 @@ impl Simulation {
         self.step_count += 1;
         self.cache_dirty = true;
 
-        let should_evaluate_kinetics = self.kinetics.as_mut()
+        let should_evaluate_kinetics = self
+            .kinetics
+            .as_mut()
             .filter(|_| self.runtime_readbacks_enabled)
             .map(|k| k.accumulate_time(dt_sim as f64))
             .unwrap_or(false);
@@ -475,7 +506,11 @@ impl Simulation {
         })
     }
 
-    pub fn record_prepared_step(&mut self, cmd: vk::CommandBuffer, step: PreparedSimulationStep) -> Result<()> {
+    pub fn record_prepared_step(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        step: PreparedSimulationStep,
+    ) -> Result<()> {
         self.prepare_dynamic_entities(step.sim_dt)?;
         self.gpu.record_step_frame(
             cmd,
@@ -531,7 +566,9 @@ impl Simulation {
         let concentrations = self.cached_concentrations.as_ref().unwrap().clone();
         let solid_mask = self.cached_solid_mask.as_ref().unwrap().clone();
         let material_ids = self.cached_material_ids.as_ref().unwrap().clone();
-        let temperatures = self.cached_temperatures.clone()
+        let temperatures = self
+            .cached_temperatures
+            .clone()
             .unwrap_or_else(|| vec![293.15; (fine_width * fine_height) as usize]);
 
         let species_registry = self.species_registry.clone();
@@ -595,7 +632,7 @@ impl Simulation {
 
         self.cached_concentrations = Some(self.gpu.read_concentrations()?);
         self.cached_temperatures = Some(self.gpu.read_temperatures()?);
-        
+
         if self.cached_solid_mask.is_none() {
             self.cached_solid_mask = Some(self.gpu.read_solid_mask()?);
         }
@@ -613,7 +650,12 @@ impl Simulation {
     }
 
     /// Inspect a coarse cell with a specific mip factor.
-    pub fn inspect_with_mip(&mut self, screen_x: f32, screen_y: f32, mip: u32) -> Result<InspectionResult> {
+    pub fn inspect_with_mip(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+        mip: u32,
+    ) -> Result<InspectionResult> {
         self.refresh_cache()?;
 
         let coord = self.inspector.screen_to_coarse(screen_x, screen_y, mip);
@@ -638,20 +680,31 @@ impl Simulation {
     pub fn render_state(&mut self) -> Result<RenderState> {
         // Only refresh every 4 steps to avoid expensive GPU readback every frame
         // This trades some visual latency for much better frame rate
-        let should_refresh = self.cache_dirty && (self.step_count % 4 == 0 || self.cached_concentrations.is_none());
-        
+        let should_refresh =
+            self.cache_dirty && (self.step_count % 4 == 0 || self.cached_concentrations.is_none());
+
         if should_refresh {
             self.refresh_cache()?;
         }
 
         // Use cached data (may be up to 4 frames old)
-        let concentrations = self.cached_concentrations.clone()
-            .unwrap_or_else(|| vec![vec![0.0; (self.grid.width * self.grid.height) as usize]; self.species_registry.count()]);
-        let solid_mask = self.cached_solid_mask.clone()
+        let concentrations = self.cached_concentrations.clone().unwrap_or_else(|| {
+            vec![
+                vec![0.0; (self.grid.width * self.grid.height) as usize];
+                self.species_registry.count()
+            ]
+        });
+        let solid_mask = self
+            .cached_solid_mask
+            .clone()
             .unwrap_or_else(|| vec![0; (self.grid.width * self.grid.height) as usize]);
-        let material_ids = self.cached_material_ids.clone()
+        let material_ids = self
+            .cached_material_ids
+            .clone()
             .unwrap_or_else(|| vec![0; (self.grid.width * self.grid.height) as usize]);
-        let temperatures = self.cached_temperatures.clone()
+        let temperatures = self
+            .cached_temperatures
+            .clone()
             .unwrap_or_else(|| vec![293.15; (self.grid.width * self.grid.height) as usize]);
 
         Ok(RenderState {
@@ -688,9 +741,9 @@ impl Simulation {
     }
 
     pub fn hovered_leak_channel(&self, grid_x: f32, grid_y: f32) -> Option<usize> {
-        self.leak_channels.iter().position(|channel| {
-            channel.contains_grid_point(grid_x, grid_y, 3.2, 1.8)
-        })
+        self.leak_channels
+            .iter()
+            .position(|channel| channel.contains_grid_point(grid_x, grid_y, 3.2, 1.8))
     }
 
     pub fn leak_channel_endpoints(&self, index: usize) -> Option<((i32, i32), (i32, i32))> {
@@ -699,7 +752,10 @@ impl Simulation {
         channel.resolve_endpoints(self.grid.width, self.grid.height, solid_mask)
     }
 
-    pub fn resolve_leak_channel_endpoints(&self, channel: &LeakChannel) -> Option<((i32, i32), (i32, i32))> {
+    pub fn resolve_leak_channel_endpoints(
+        &self,
+        channel: &LeakChannel,
+    ) -> Option<((i32, i32), (i32, i32))> {
         let solid_mask = self.cached_solid_mask.as_ref()?;
         channel.resolve_endpoints(self.grid.width, self.grid.height, solid_mask)
     }
@@ -758,13 +814,17 @@ impl Simulation {
     }
 
     fn sync_leak_channels(&mut self) -> Result<()> {
-        let solid_mask = self.cached_solid_mask.as_ref()
+        let solid_mask = self
+            .cached_solid_mask
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Solid mask cache is unavailable"))?;
-        self.gpu.upload_leak_channels(&self.leak_channels, &self.species_registry, solid_mask)
+        self.gpu
+            .upload_leak_channels(&self.leak_channels, &self.species_registry, solid_mask)
     }
 
     fn sync_enzyme_entities(&mut self) -> Result<()> {
-        self.gpu.upload_enzyme_entities(&self.enzyme_entities, &self.species_registry)
+        self.gpu
+            .upload_enzyme_entities(&self.enzyme_entities, &self.species_registry)
     }
 
     /// Get the current simulation time.
@@ -833,7 +893,7 @@ impl Simulation {
         let mut config = self.config.clone();
         config.width = width;
         config.height = height;
-        
+
         *self = Self::from_scenario(scenario, config)?;
         Ok(())
     }
@@ -903,7 +963,10 @@ impl Simulation {
 
     /// Get the coarse grid dimensions (if available).
     pub fn coarse_dimensions(&self) -> Option<(u32, u32)> {
-        self.gpu.coarse_grid.as_ref().map(|c| (c.coarse_width, c.coarse_height))
+        self.gpu
+            .coarse_grid
+            .as_ref()
+            .map(|c| (c.coarse_width, c.coarse_height))
     }
 
     /// Get the mip factor used for coarse grid.
@@ -935,7 +998,8 @@ impl Simulation {
 
     /// Get the time since last kinetics evaluation.
     pub fn time_since_kinetics_evaluation(&self) -> f64 {
-        self.kinetics.as_ref()
+        self.kinetics
+            .as_ref()
             .map(|k| k.time_since_last_evaluation())
             .unwrap_or(0.0)
     }
@@ -952,4 +1016,3 @@ impl Simulation {
         self.kinetics.as_ref().map(|k| k.stats())
     }
 }
-

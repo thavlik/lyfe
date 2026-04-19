@@ -100,8 +100,10 @@ impl RenderContext {
 
         // Required extensions for windowing
         let mut extensions = vec![ash::khr::surface::NAME.as_ptr()];
-        
-        let display_handle = window.display_handle().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let display_handle = window
+            .display_handle()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let raw_display_handle = display_handle.as_raw();
         match raw_display_handle {
             RawDisplayHandle::Xlib(_) => {
@@ -132,11 +134,14 @@ impl RenderContext {
             bail!("No Vulkan-capable GPU found");
         }
 
-        let physical_device = physical_devices.into_iter()
+        let physical_device = physical_devices
+            .into_iter()
             .find(|&pd| {
                 // Check for swapchain support
                 let extensions = unsafe {
-                    instance.enumerate_device_extension_properties(pd).unwrap_or_default()
+                    instance
+                        .enumerate_device_extension_properties(pd)
+                        .unwrap_or_default()
                 };
                 extensions.iter().any(|ext| {
                     let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
@@ -146,19 +151,22 @@ impl RenderContext {
             .context("No GPU with swapchain support found")?;
 
         // Find graphics queue family with present support
-        let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-        let graphics_queue_family = queue_families.iter()
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let graphics_queue_family = queue_families
+            .iter()
             .enumerate()
             .position(|(i, qf)| {
-                qf.queue_flags.contains(vk::QueueFlags::GRAPHICS) &&
-                qf.queue_flags.contains(vk::QueueFlags::COMPUTE) &&
-                unsafe {
-                    surface_loader.get_physical_device_surface_support(
-                        physical_device, i as u32, surface
-                    ).unwrap_or(false)
-                }
+                qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                    && qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                    && unsafe {
+                        surface_loader
+                            .get_physical_device_surface_support(physical_device, i as u32, surface)
+                            .unwrap_or(false)
+                    }
             })
-            .context("No graphics+compute queue with present support")? as u32;
+            .context("No graphics+compute queue with present support")?
+            as u32;
 
         // Create logical device
         let queue_priority = [1.0f32];
@@ -188,7 +196,7 @@ impl RenderContext {
 
         // Create swapchain
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
-        
+
         let surface_caps = unsafe {
             surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
         };
@@ -200,7 +208,8 @@ impl RenderContext {
         };
 
         // Choose format (prefer SRGB)
-        let format = surface_formats.iter()
+        let format = surface_formats
+            .iter()
             .find(|f| f.format == vk::Format::B8G8R8A8_SRGB)
             .unwrap_or(&surface_formats[0])
             .clone();
@@ -214,14 +223,23 @@ impl RenderContext {
         } else {
             let size = window.inner_size();
             vk::Extent2D {
-                width: size.width.clamp(surface_caps.min_image_extent.width, surface_caps.max_image_extent.width),
-                height: size.height.clamp(surface_caps.min_image_extent.height, surface_caps.max_image_extent.height),
+                width: size.width.clamp(
+                    surface_caps.min_image_extent.width,
+                    surface_caps.max_image_extent.width,
+                ),
+                height: size.height.clamp(
+                    surface_caps.min_image_extent.height,
+                    surface_caps.max_image_extent.height,
+                ),
             }
         };
 
-        let image_count = (surface_caps.min_image_count + 1).min(
-            if surface_caps.max_image_count > 0 { surface_caps.max_image_count } else { u32::MAX }
-        );
+        let image_count =
+            (surface_caps.min_image_count + 1).min(if surface_caps.max_image_count > 0 {
+                surface_caps.max_image_count
+            } else {
+                u32::MAX
+            });
 
         let swapchain_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
@@ -241,7 +259,8 @@ impl RenderContext {
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
 
         // Create image views
-        let swapchain_image_views: Vec<_> = swapchain_images.iter()
+        let swapchain_image_views: Vec<_> = swapchain_images
+            .iter()
             .map(|&image| {
                 let view_info = vk::ImageViewCreateInfo::default()
                     .image(image)
@@ -299,7 +318,8 @@ impl RenderContext {
         let render_pass = unsafe { device.create_render_pass(&render_pass_info, None)? };
 
         // Create framebuffers
-        let framebuffers: Vec<_> = swapchain_image_views.iter()
+        let framebuffers: Vec<_> = swapchain_image_views
+            .iter()
             .map(|&view| {
                 let attachments = [view];
                 let fb_info = vk::FramebufferCreateInfo::default()
@@ -327,16 +347,17 @@ impl RenderContext {
 
         // Create synchronization objects
         let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let fence_info = vk::FenceCreateInfo::default()
-            .flags(vk::FenceCreateFlags::SIGNALED);
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
         let mut image_available_semaphores = Vec::with_capacity(frames_in_flight);
         let mut render_finished_semaphores = Vec::with_capacity(frames_in_flight);
         let mut in_flight_fences = Vec::with_capacity(frames_in_flight);
 
         for _ in 0..frames_in_flight {
-            image_available_semaphores.push(unsafe { device.create_semaphore(&semaphore_info, None)? });
-            render_finished_semaphores.push(unsafe { device.create_semaphore(&semaphore_info, None)? });
+            image_available_semaphores
+                .push(unsafe { device.create_semaphore(&semaphore_info, None)? });
+            render_finished_semaphores
+                .push(unsafe { device.create_semaphore(&semaphore_info, None)? });
             in_flight_fences.push(unsafe { device.create_fence(&fence_info, None)? });
         }
 
@@ -385,17 +406,27 @@ impl RenderContext {
 
         // Get surface capabilities
         let surface_caps = unsafe {
-            self.surface_loader.get_physical_device_surface_capabilities(self.physical_device, self.surface)?
+            self.surface_loader
+                .get_physical_device_surface_capabilities(self.physical_device, self.surface)?
         };
 
         let extent = vk::Extent2D {
-            width: width.clamp(surface_caps.min_image_extent.width, surface_caps.max_image_extent.width),
-            height: height.clamp(surface_caps.min_image_extent.height, surface_caps.max_image_extent.height),
+            width: width.clamp(
+                surface_caps.min_image_extent.width,
+                surface_caps.max_image_extent.width,
+            ),
+            height: height.clamp(
+                surface_caps.min_image_extent.height,
+                surface_caps.max_image_extent.height,
+            ),
         };
 
-        let image_count = (surface_caps.min_image_count + 1).min(
-            if surface_caps.max_image_count > 0 { surface_caps.max_image_count } else { u32::MAX }
-        );
+        let image_count =
+            (surface_caps.min_image_count + 1).min(if surface_caps.max_image_count > 0 {
+                surface_caps.max_image_count
+            } else {
+                u32::MAX
+            });
 
         let swapchain_info = vk::SwapchainCreateInfoKHR::default()
             .surface(self.surface)
@@ -412,15 +443,21 @@ impl RenderContext {
             .clipped(true)
             .old_swapchain(old_swapchain);
 
-        self.swapchain = unsafe { self.swapchain_loader.create_swapchain(&swapchain_info, None)? };
-        
+        self.swapchain = unsafe {
+            self.swapchain_loader
+                .create_swapchain(&swapchain_info, None)?
+        };
+
         unsafe { self.swapchain_loader.destroy_swapchain(old_swapchain, None) };
 
-        self.swapchain_images = unsafe { self.swapchain_loader.get_swapchain_images(self.swapchain)? };
+        self.swapchain_images =
+            unsafe { self.swapchain_loader.get_swapchain_images(self.swapchain)? };
         self.swapchain_extent = extent;
 
         // Recreate image views
-        self.swapchain_image_views = self.swapchain_images.iter()
+        self.swapchain_image_views = self
+            .swapchain_images
+            .iter()
             .map(|&image| {
                 let view_info = vk::ImageViewCreateInfo::default()
                     .image(image)
@@ -444,7 +481,9 @@ impl RenderContext {
             .collect::<Result<_, _>>()?;
 
         // Recreate framebuffers
-        self.framebuffers = self.swapchain_image_views.iter()
+        self.framebuffers = self
+            .swapchain_image_views
+            .iter()
             .map(|&view| {
                 let attachments = [view];
                 let fb_info = vk::FramebufferCreateInfo::default()
@@ -482,7 +521,8 @@ impl RenderContext {
         match result {
             Ok((index, false)) => {
                 unsafe {
-                    self.device.reset_fences(&[self.in_flight_fences[self.current_frame]])?;
+                    self.device
+                        .reset_fences(&[self.in_flight_fences[self.current_frame]])?;
                 }
                 Ok(Some(index))
             }
@@ -522,7 +562,8 @@ impl RenderContext {
             .image_indices(&image_indices);
 
         let result = unsafe {
-            self.swapchain_loader.queue_present(self.graphics_queue, &present_info)
+            self.swapchain_loader
+                .queue_present(self.graphics_queue, &present_info)
         };
 
         self.current_frame = (self.current_frame + 1) % self.frames_in_flight;
@@ -543,10 +584,17 @@ impl RenderContext {
     }
 
     pub fn is_frame_complete(&self, frame_index: usize) -> Result<bool> {
-        match unsafe { self.device.get_fence_status(self.in_flight_fences[frame_index]) } {
+        match unsafe {
+            self.device
+                .get_fence_status(self.in_flight_fences[frame_index])
+        } {
             Ok(true) => Ok(true),
             Ok(false) => Ok(false),
-            Err(error) => bail!("Failed to query fence status for frame {}: {:?}", frame_index, error),
+            Err(error) => bail!(
+                "Failed to query fence status for frame {}: {:?}",
+                frame_index,
+                error
+            ),
         }
     }
 
@@ -588,7 +636,8 @@ impl Drop for RenderContext {
                 self.device.destroy_image_view(view, None);
             }
             self.device.destroy_render_pass(self.render_pass, None);
-            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
             log::info!("RenderContext::drop - vulkan objects destroyed");
 
@@ -611,8 +660,12 @@ fn create_surface(
     instance: &ash::Instance,
     window: &Window,
 ) -> Result<vk::SurfaceKHR> {
-    let display_handle = window.display_handle().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let window_handle = window.window_handle().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let display_handle = window
+        .display_handle()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let window_handle = window
+        .window_handle()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     match (display_handle.as_raw(), window_handle.as_raw()) {
         #[cfg(target_os = "linux")]
@@ -631,7 +684,7 @@ fn create_surface(
                 .surface(window.surface.as_ptr());
             Ok(unsafe { loader.create_wayland_surface(&info, None)? })
         }
-        #[cfg(target_os = "linux")]  
+        #[cfg(target_os = "linux")]
         (RawDisplayHandle::Xcb(display), RawWindowHandle::Xcb(window)) => {
             let loader = ash::khr::xcb_surface::Instance::new(entry, instance);
             let info = vk::XcbSurfaceCreateInfoKHR::default()

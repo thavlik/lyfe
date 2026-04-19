@@ -41,17 +41,30 @@ fn main() {
 
     let initial = simulation.render_state().expect("initial render state");
     let initial_acid_total = total_in_fluid(&initial.concentrations[acid_idx], &initial.solid_mask);
-    let initial_hydroxide_total = total_in_fluid(&initial.concentrations[hydroxide_idx], &initial.solid_mask);
-    let initial_acetate_total = total_in_fluid(&initial.concentrations[acetate_idx], &initial.solid_mask);
+    let initial_hydroxide_total =
+        total_in_fluid(&initial.concentrations[hydroxide_idx], &initial.solid_mask);
+    let initial_acetate_total =
+        total_in_fluid(&initial.concentrations[acetate_idx], &initial.solid_mask);
 
     for _ in 0..72 {
-        simulation.step(1.0 / 60.0).expect("simulation step should succeed");
+        simulation
+            .step(1.0 / 60.0)
+            .expect("simulation step should succeed");
     }
 
     let final_state = simulation.render_state().expect("final render state");
-    let final_acid_total = total_in_fluid(&final_state.concentrations[acid_idx], &final_state.solid_mask);
-    let final_hydroxide_total = total_in_fluid(&final_state.concentrations[hydroxide_idx], &final_state.solid_mask);
-    let final_acetate_total = total_in_fluid(&final_state.concentrations[acetate_idx], &final_state.solid_mask);
+    let final_acid_total = total_in_fluid(
+        &final_state.concentrations[acid_idx],
+        &final_state.solid_mask,
+    );
+    let final_hydroxide_total = total_in_fluid(
+        &final_state.concentrations[hydroxide_idx],
+        &final_state.solid_mask,
+    );
+    let final_acetate_total = total_in_fluid(
+        &final_state.concentrations[acetate_idx],
+        &final_state.solid_mask,
+    );
 
     println!("initial_acid_total={initial_acid_total}");
     println!("initial_hydroxide_total={initial_hydroxide_total}");
